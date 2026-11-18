@@ -1,319 +1,83 @@
 import { supabase } from "./supabase";
 
-import type {
-  Bill,
-  Payment,
-  PaymentMethod,
-  BillStatus,
-} from "../screens/BillingScreen";
+/* =========================================================
+   TYPES
+========================================================= */
 
-function formatDate(value: string | null): string {
-  if (!value) return "";
+export type PaymentMethod =
+  | "Cash"
+  | "UPI"
+  | "Card"
+  | "Other";
 
-  const match = value.match(
-    /^(\d{4})-(\d{2})-(\d{2})/
-  );
+export type BillStatus =
+  | "Unpaid"
+  | "Partially Paid"
+  | "Paid";
 
-  if (!match) return value;
+export type Payment = {
+  id: string;
+  billId: string;
+  amount: number;
+  method: PaymentMethod;
+  paymentDate: string;
+};
 
-  const [, year, month, day] = match;
+export type Bill = {
+  id: string;
 
-  return new Date(
-    Number(year),
-    Number(month) - 1,
-    Number(day)
-  ).toLocaleDateString("en-GB", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  });
-}
+  /*
+    Database UUID.
+    This remains the internal bill ID.
+  */
+  billNumber?: string;
 
-function isValidCalendarDate(
-  year: number,
-  month: number,
-  day: number
-): boolean {
-  if (
-    !Number.isInteger(year) ||
-    year < 1900 ||
-    year > 2100
-  ) {
-    return false;
-  }
+  /*
+    Friendly invoice number.
+    Example: BILL-75646186
+  */
 
-  if (
-    !Number.isInteger(month) ||
-    month < 1 ||
-    month > 12
-  ) {
-    return false;
-  }
+  orderId: string;
+  customerId: string;
+  customerName: string;
+  item: string;
 
-  if (
-    !Number.isInteger(day) ||
-    day < 1
-  ) {
-    return false;
-  }
+  /*
+    Multiple boutique items support.
+    Keeps old single-item bills working.
+  */
+  items?: {
+    description: string;
+    quantity: number;
+    amount: number;
+  }[];
 
-  const daysInMonth = new Date(
-    year,
-    month,
-    0
-  ).getDate();
+  quantity: number;
+  price: number;
+  subtotal: number;
+  discount: number;
+  tax: number;
+  total: number;
+  paidAmount: number;
+  balance: number;
+  paymentMethod: PaymentMethod;
+  status: BillStatus;
+  billDate: string;
+};
 
-  return day <= daysInMonth;
-}
+/* =========================================================
+   HELPERS
+========================================================= */
 
-function toDatabaseDate(
-  value: string
-): string {
-  const trimmed = value.trim();
+const toNumber = (value: unknown): number => {
+  const number = Number(value);
 
-  if (!trimmed) {
-    throw new Error(
-      "Bill date is required."
-    );
-  }
+  return Number.isFinite(number) ? number : 0;
+};
 
-  // --------------------------------------------------
-  // YYYY-MM-DD
-  // --------------------------------------------------
-  const isoMatch = trimmed.match(
-    /^(\d{4})-(\d{2})-(\d{2})$/
-  );
-
-  if (isoMatch) {
-    const [
-      ,
-      yearText,
-      monthText,
-      dayText,
-    ] = isoMatch;
-
-    const year = Number(yearText);
-    const month = Number(monthText);
-    const day = Number(dayText);
-
-    if (
-      !isValidCalendarDate(
-        year,
-        month,
-        day
-      )
-    ) {
-      throw new Error(
-        `Invalid bill date: ${value}`
-      );
-    }
-
-    return `${yearText}-${monthText}-${dayText}`;
-  }
-
-  // --------------------------------------------------
-  // DD/MM/YYYY
-  // --------------------------------------------------
-  const ddmmyyyy = trimmed.match(
-    /^(\d{2})\/(\d{2})\/(\d{4})$/
-  );
-
-  if (ddmmyyyy) {
-    const [
-      ,
-      dayText,
-      monthText,
-      yearText,
-    ] = ddmmyyyy;
-
-    const day = Number(dayText);
-    const month = Number(monthText);
-    const year = Number(yearText);
-
-    if (
-      !isValidCalendarDate(
-        year,
-        month,
-        day
-      )
-    ) {
-      throw new Error(
-        `Invalid bill date: ${value}`
-      );
-    }
-
-    return `${yearText}-${monthText}-${dayText}`;
-  }
-
-  // --------------------------------------------------
-  // DD Mon YYYY / DD Month YYYY
-  //
-  // Examples:
-  // 21 Sep 2026
-  // 21 Sept 2026
-  // 21 September 2026
-  // --------------------------------------------------
-  const textDate = trimmed.match(
-    /^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/
-  );
-
-  if (textDate) {
-    const [
-      ,
-      dayText,
-      monthText,
-      yearText,
-    ] = textDate;
-
-    const monthMap: Record<
-      string,
-      number
-    > = {
-      jan: 1,
-      january: 1,
-
-      feb: 2,
-      february: 2,
-
-      mar: 3,
-      march: 3,
-
-      apr: 4,
-      april: 4,
-
-      may: 5,
-
-      jun: 6,
-      june: 6,
-
-      jul: 7,
-      july: 7,
-
-      aug: 8,
-      august: 8,
-
-      sep: 9,
-      sept: 9,
-      september: 9,
-
-      oct: 10,
-      october: 10,
-
-      nov: 11,
-      november: 11,
-
-      dec: 12,
-      december: 12,
-    };
-
-    const month =
-      monthMap[
-        monthText.toLowerCase()
-      ];
-
-    if (!month) {
-      throw new Error(
-        `Invalid bill date: ${value}`
-      );
-    }
-
-    const day = Number(dayText);
-    const year = Number(yearText);
-
-    if (
-      !isValidCalendarDate(
-        year,
-        month,
-        day
-      )
-    ) {
-      throw new Error(
-        `Invalid bill date: ${value}`
-      );
-    }
-
-    const formattedMonth =
-      String(month).padStart(2, "0");
-
-    const formattedDay =
-      String(day).padStart(2, "0");
-
-    return `${year}-${formattedMonth}-${formattedDay}`;
-  }
-
-  // --------------------------------------------------
-  // Fallback for other valid JS date strings
-  // --------------------------------------------------
-  const parsed = Date.parse(trimmed);
-
-  if (!Number.isNaN(parsed)) {
-    const date = new Date(parsed);
-
-    const year =
-      date.getFullYear();
-
-    const month =
-      date.getMonth() + 1;
-
-    const day =
-      date.getDate();
-
-    if (
-      !isValidCalendarDate(
-        year,
-        month,
-        day
-      )
-    ) {
-      throw new Error(
-        `Invalid bill date: ${value}`
-      );
-    }
-
-    return [
-      String(year),
-      String(month).padStart(2, "0"),
-      String(day).padStart(2, "0"),
-    ].join("-");
-  }
-
-  throw new Error(
-    `Invalid bill date: ${value}`
-  );
-}
-
-function formatPaymentDate(
-  value: string | null
-): string {
-  if (!value) return "";
-
-  return new Date(
-    value
-  ).toLocaleDateString("en-GB", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  });
-}
-
-function getBillStatus(
-  total: number,
-  paidAmount: number
-): BillStatus {
-  if (paidAmount >= total) {
-    return "Paid";
-  }
-
-  if (paidAmount > 0) {
-    return "Partially Paid";
-  }
-
-  return "Unpaid";
-}
-
-function normalizePaymentMethod(
-  value: string
-): PaymentMethod {
+const normalizePaymentMethod = (
+  value: unknown
+): PaymentMethod => {
   if (
     value === "Cash" ||
     value === "UPI" ||
@@ -323,683 +87,812 @@ function normalizePaymentMethod(
     return value;
   }
 
-  return "Other";
-}
+  return "Cash";
+};
 
-function mapPayment(
-  row: any,
-  billNumber: string
-): Payment {
-  return {
-    id: row.id,
-    billId: billNumber,
-    amount: Number(
-      row.amount || 0
-    ),
-    method:
-      normalizePaymentMethod(
-        row.method
-      ),
-    paymentDate:
-      formatPaymentDate(
-        row.payment_date
-      ),
-  };
-}
+const calculateStatus = (
+  total: number,
+  paidAmount: number
+): BillStatus => {
+  if (total > 0 && paidAmount >= total) {
+    return "Paid";
+  }
 
-function mapBill(
-  row: any,
-  paymentRows: any[]
-): Bill {
-  const paymentsForBill =
-    paymentRows.filter(
-      (payment) =>
-        payment.bill_id === row.id
-    );
+  if (paidAmount > 0) {
+    return "Partially Paid";
+  }
 
-  const paidAmount =
-    paymentsForBill.reduce(
-      (sum, payment) =>
-        sum +
-        Number(
-          payment.amount || 0
-        ),
-      0
-    );
+  return "Unpaid";
+};
 
-  const total =
-    Number(row.total || 0);
+/* =========================================================
+   GET CURRENT USER + SHOP ID
+========================================================= */
 
-  const latestPayment =
-    paymentsForBill.length > 0
-      ? paymentsForBill[
-          paymentsForBill.length - 1
-        ]
-      : null;
-
-  const customerName =
-    Array.isArray(row.customers)
-      ? row.customers[0]?.name ||
-        "Unknown Customer"
-      : row.customers?.name ||
-        "Unknown Customer";
-
-  const order =
-    Array.isArray(row.orders)
-      ? row.orders[0]
-      : row.orders;
-
-  return {
-    id: row.bill_number,
-    orderId: row.order_id,
-    customerId: row.customer_id,
-    customerName,
-
-    item:
-      order?.item || "",
-
-    quantity: Number(
-      order?.quantity || 1
-    ),
-
-    price: Number(
-      order?.price || 0
-    ),
-
-    subtotal: Number(
-      row.subtotal || 0
-    ),
-
-    discount: Number(
-      row.discount || 0
-    ),
-
-    tax: Number(
-      row.tax || 0
-    ),
-
-    total,
-
-    paidAmount,
-
-    balance: Math.max(
-      total - paidAmount,
-      0
-    ),
-
-    paymentMethod:
-      latestPayment
-        ? normalizePaymentMethod(
-            latestPayment.method
-          )
-        : "Other",
-
-    status: getBillStatus(
-      total,
-      paidAmount
-    ),
-
-    billDate: formatDate(
-      row.bill_date
-    ),
-  };
-}
-
-async function getShopId(): Promise<string> {
+const getCurrentShopId = async (): Promise<string> => {
   const {
     data: { user },
     error: userError,
   } = await supabase.auth.getUser();
 
+  console.log(
+    "BILL SERVICE USER ID:",
+    user?.id
+  );
+
+  console.log(
+    "BILL SERVICE USER EMAIL:",
+    user?.email
+  );
+
   if (userError) {
-    throw new Error(
-      userError.message
+    console.error(
+      "GET USER ERROR:",
+      userError
     );
+
+    throw userError;
   }
 
   if (!user) {
     throw new Error(
-      "You must be logged in."
+      "User is not authenticated."
     );
   }
 
   const {
-    data,
-    error,
-  } = await supabase
-    .from("profiles")
-    .select("shop_id")
-    .eq("id", user.id)
-    .maybeSingle();
+    data: shopId,
+    error: shopError,
+  } = await supabase.rpc(
+    "get_my_shop_id"
+  );
 
-  if (error) {
+  console.log(
+    "BILL SERVICE SHOP ID:",
+    shopId
+  );
+
+  if (shopError) {
+    console.error(
+      "GET SHOP ID ERROR:",
+      shopError
+    );
+
+    throw shopError;
+  }
+
+  if (!shopId) {
     throw new Error(
-      error.message
+      "No shop is assigned to the current user."
     );
   }
 
-  if (!data?.shop_id) {
-    throw new Error(
-      "No shop is connected to this account."
-    );
-  }
-
-  return data.shop_id;
-}
-
-export type BillingData = {
-  bills: Bill[];
-  payments: Payment[];
+  return String(shopId);
 };
 
-export async function fetchBillingData(): Promise<BillingData> {
-  const {
-    data: billRows,
-    error: billError,
-  } = await supabase
-    .from("bills")
-    .select(`
-      *,
-      customers(name),
-      orders(item, quantity, price)
-    `)
-    .order("created_at", {
-      ascending: false,
-    });
+/* =========================================================
+   MAP DATABASE BILL → APP BILL
+========================================================= */
 
-  if (billError) {
-    throw new Error(
-      billError.message
-    );
-  }
-
-  const rows = billRows ?? [];
-
-  if (rows.length === 0) {
-    return {
-      bills: [],
-      payments: [],
-    };
-  }
-
-  const billIds = rows.map(
-    (row: any) => row.id
+const mapBill = (row: any): Bill => {
+  const quantity = toNumber(
+    row.quantity
   );
 
-  const {
-    data: paymentRows,
-    error: paymentError,
-  } = await supabase
-    .from("payments")
-    .select("*")
-    .in(
-      "bill_id",
-      billIds
-    )
-    .order("payment_date", {
-      ascending: true,
-    });
-
-  if (paymentError) {
-    throw new Error(
-      paymentError.message
-    );
-  }
-
-  const payments =
-    paymentRows ?? [];
-
-  const bills = rows.map(
-    (row: any) =>
-      mapBill(
-        row,
-        payments
-      )
+  const price = toNumber(
+    row.price
   );
 
-  const billNumberById =
-    new Map<string, string>();
+  const subtotal =
+    row.subtotal !== undefined &&
+    row.subtotal !== null
+      ? toNumber(row.subtotal)
+      : quantity * price;
 
-  for (const row of rows) {
-    billNumberById.set(
-      row.id,
-      row.bill_number
-    );
-  }
-
-  return {
-    bills,
-
-    payments: payments
-      .filter(
-        (payment: any) =>
-          billNumberById.has(
-            payment.bill_id
-          )
-      )
-      .map(
-        (payment: any) =>
-          mapPayment(
-            payment,
-            billNumberById.get(
-              payment.bill_id
-            )!
-          )
-      ),
-  };
-}
-
-export async function fetchBills(): Promise<Bill[]> {
-  const data =
-    await fetchBillingData();
-
-  return data.bills;
-}
-
-export async function fetchPayments(): Promise<Payment[]> {
-  const data =
-    await fetchBillingData();
-
-  return data.payments;
-}
-
-export async function createBill(
-  input: Bill
-): Promise<Bill> {
-  const shopId =
-    await getShopId();
-
-  if (!input.orderId) {
-    throw new Error(
-      "Order is required."
-    );
-  }
-
-  if (!input.customerId) {
-    throw new Error(
-      "Customer is required."
-    );
-  }
-
-  if (!input.id.trim()) {
-    throw new Error(
-      "Bill number is required."
-    );
-  }
-
-  const {
-    data: existingOrderBill,
-    error: existingError,
-  } = await supabase
-    .from("bills")
-    .select("id")
-    .eq(
-      "order_id",
-      input.orderId
-    )
-    .maybeSingle();
-
-  if (existingError) {
-    throw new Error(
-      existingError.message
-    );
-  }
-
-  if (existingOrderBill) {
-    throw new Error(
-      `A bill already exists for order ${input.orderId}.`
-    );
-  }
-
-  const {
-    data,
-    error,
-  } = await supabase
-    .from("bills")
-    .insert({
-      shop_id: shopId,
-
-      order_id:
-        input.orderId,
-
-      customer_id:
-        input.customerId,
-
-      bill_number:
-        input.id.trim(),
-
-      subtotal:
-        Number(
-          input.subtotal || 0
-        ),
-
-      discount:
-        Number(
-          input.discount || 0
-        ),
-
-      tax:
-        Number(
-          input.tax || 0
-        ),
-
-      total:
-        Number(
-          input.total || 0
-        ),
-
-      status:
-        input.status,
-
-      bill_date:
-        toDatabaseDate(
-          input.billDate
-        ),
-    })
-    .select(`
-      *,
-      customers(name),
-      orders(item, quantity, price)
-    `)
-    .single();
-
-  if (error) {
-    throw new Error(
-      error.message
-    );
-  }
-
-  if (!data) {
-    throw new Error(
-      "Bill was not returned after saving."
-    );
-  }
-
-  return mapBill(
-    data,
-    []
+  const discount = toNumber(
+    row.discount
   );
-}
 
-export async function updateBill(
-  input: Bill
-): Promise<Bill> {
-  if (!input.id) {
-    throw new Error(
-      "Bill ID is required."
-    );
-  }
-
-  const {
-    data,
-    error,
-  } = await supabase
-    .from("bills")
-    .update({
-      status:
-        input.status,
-
-      updated_at:
-        new Date().toISOString(),
-    })
-    .eq(
-      "bill_number",
-      input.id
-    )
-    .select(`
-      *,
-      customers(name),
-      orders(item, quantity, price)
-    `)
-    .single();
-
-  if (error) {
-    throw new Error(
-      error.message
-    );
-  }
-
-  if (!data) {
-    throw new Error(
-      "Bill was not returned after updating."
-    );
-  }
-
-  const {
-    data: paymentRows,
-    error: paymentError,
-  } = await supabase
-    .from("payments")
-    .select("*")
-    .eq(
-      "bill_id",
-      data.id
-    )
-    .order("payment_date", {
-      ascending: true,
-    });
-
-  if (paymentError) {
-    throw new Error(
-      paymentError.message
-    );
-  }
-
-  return mapBill(
-    data,
-    paymentRows ?? []
+  const tax = toNumber(
+    row.tax
   );
-}
 
-export async function createPayment(
-  input: Payment
-): Promise<{
-  payment: Payment;
-  bill: Bill;
-}> {
-  if (!input.billId) {
-    throw new Error(
-      "Bill ID is required."
-    );
-  }
-
-  if (
-    !Number.isFinite(
-      input.amount
-    ) ||
-    input.amount <= 0
-  ) {
-    throw new Error(
-      "Payment amount must be greater than 0."
-    );
-  }
-
-  const {
-    data: billRow,
-    error: billError,
-  } = await supabase
-    .from("bills")
-    .select(`
-      *,
-      customers(name),
-      orders(item, quantity, price)
-    `)
-    .eq(
-      "bill_number",
-      input.billId
-    )
-    .single();
-
-  if (billError) {
-    throw new Error(
-      billError.message
-    );
-  }
-
-  if (!billRow) {
-    throw new Error(
-      "Bill was not found."
-    );
-  }
-
-  const {
-    data: existingPayments,
-    error: paymentsError,
-  } = await supabase
-    .from("payments")
-    .select("*")
-    .eq(
-      "bill_id",
-      billRow.id
-    )
-    .order("payment_date", {
-      ascending: true,
-    });
-
-  if (paymentsError) {
-    throw new Error(
-      paymentsError.message
-    );
-  }
-
-  const paidBefore =
-    (existingPayments ?? [])
-      .reduce(
-        (sum, payment) =>
-          sum +
-          Number(
-            payment.amount || 0
-          ),
-        0
-      );
+  const calculatedTotal = Math.max(
+    subtotal - discount + tax,
+    0
+  );
 
   const total =
-    Number(
-      billRow.total || 0
+    row.total !== undefined &&
+    row.total !== null
+      ? toNumber(row.total)
+      : calculatedTotal;
+
+  const paidAmount = toNumber(
+    row.paid_amount ??
+      row.paidAmount
+  );
+
+  const balance =
+    row.balance !== undefined &&
+    row.balance !== null
+      ? Math.max(
+          toNumber(row.balance),
+          0
+        )
+      : Math.max(
+          total - paidAmount,
+          0
+        );
+
+  const status: BillStatus =
+    row.status === "Paid" ||
+    row.status === "Partially Paid" ||
+    row.status === "Unpaid"
+      ? row.status
+      : calculateStatus(
+          total,
+          paidAmount
+        );
+
+  return {
+    /*
+      IMPORTANT:
+      id = database UUID.
+      Never replace this with bill_number because
+      payments and updates depend on the UUID.
+    */
+    id: String(
+      row.id ?? ""
+    ),
+
+    /*
+      Friendly invoice number.
+      Example: BILL-75646186
+    */
+    billNumber:
+      row.bill_number ??
+      row.billNumber ??
+      undefined,
+
+    orderId: String(
+      row.order_id ??
+        row.orderId ??
+        ""
+    ),
+
+    customerId: String(
+      row.customer_id ??
+        row.customerId ??
+        ""
+    ),
+
+    customerName:
+      row.customer_name ??
+      row.customerName ??
+      "",
+
+    item:
+      row.item ??
+      "",
+
+    quantity,
+
+    price,
+
+    subtotal,
+
+    discount,
+
+    tax,
+
+    total,
+
+    paidAmount,
+
+    balance,
+
+    paymentMethod:
+      normalizePaymentMethod(
+        row.payment_method ??
+          row.paymentMethod
+      ),
+
+    status,
+
+    billDate:
+      row.bill_date ??
+      row.billDate ??
+      new Date().toISOString(),
+  };
+};
+
+/* =========================================================
+   MAP DATABASE PAYMENT → APP PAYMENT
+========================================================= */
+
+const mapPayment = (
+  row: any
+): Payment => {
+  return {
+    id: String(
+      row.id ?? ""
+    ),
+
+    billId: String(
+      row.bill_id ??
+        row.billId ??
+        ""
+    ),
+
+    amount: toNumber(
+      row.amount
+    ),
+
+    method:
+      normalizePaymentMethod(
+        row.method ??
+          row.payment_method ??
+          row.paymentMethod
+      ),
+
+    paymentDate:
+      row.payment_date ??
+      row.paymentDate ??
+      new Date().toISOString(),
+  };
+};
+
+/* =========================================================
+   MAP APP BILL → DATABASE BILL
+========================================================= */
+
+const mapBillToDatabase = (
+  bill: Bill,
+  shopId: string
+) => {
+  /*
+    IMPORTANT:
+
+    bill.id = database UUID for existing bills.
+
+    bill.billNumber = friendly invoice number.
+
+    For a NEW bill created by the app,
+    bill.id contains BILL-XXXXXXXX.
+    Therefore we use bill.billNumber first,
+    then fall back to bill.id.
+  */
+
+  const billNumber =
+    bill.billNumber ||
+    (
+      bill.id &&
+      bill.id.startsWith("BILL-")
+        ? bill.id
+        : null
     );
 
-  const balanceBefore =
-    Math.max(
-      total - paidBefore,
-      0
+  return {
+    shop_id: shopId,
+
+    order_id:
+      bill.orderId || null,
+
+    customer_id:
+      bill.customerId || null,
+
+    bill_number:
+      billNumber,
+
+    subtotal:
+      Number(
+        bill.subtotal || 0
+      ),
+
+    discount:
+      Number(
+        bill.discount || 0
+      ),
+
+    tax:
+      Number(
+        bill.tax || 0
+      ),
+
+    total:
+      Number(
+        bill.total || 0
+      ),
+
+    paid_amount:
+      Number(
+        bill.paidAmount || 0
+      ),
+
+    balance:
+      Number(
+        bill.balance || 0
+      ),
+
+    status:
+      bill.status,
+
+    bill_date:
+      bill.billDate,
+  };
+};
+
+/* =========================================================
+   MAP APP PAYMENT → DATABASE PAYMENT
+========================================================= */
+
+const mapPaymentToDatabase = (
+  payment: Payment
+) => {
+  return {
+    bill_id:
+      payment.billId,
+
+    amount:
+      Number(
+        payment.amount || 0
+      ),
+
+    method:
+      payment.method,
+
+    payment_date:
+      payment.paymentDate,
+  };
+};
+
+/* =========================================================
+   FETCH BILLS
+========================================================= */
+
+export const fetchBills =
+  async (): Promise<Bill[]> => {
+    const {
+      data,
+      error,
+    } = await supabase
+      .from("bills")
+      .select("*")
+      .order(
+        "bill_date",
+        {
+          ascending: false,
+        }
+      );
+
+    if (error) {
+      console.error(
+        "FETCH BILLS ERROR:",
+        error
+      );
+
+      throw error;
+    }
+
+    return (
+      data ?? []
+    ).map(
+      (row) =>
+        mapBill(row)
     );
+  };
 
-  if (
-    input.amount >
-    balanceBefore
-  ) {
-    throw new Error(
-      `Payment cannot be greater than the remaining balance of ₹${balanceBefore}.`
+/* =========================================================
+   FETCH PAYMENTS
+========================================================= */
+
+export const fetchPayments =
+  async (): Promise<Payment[]> => {
+    const {
+      data,
+      error,
+    } = await supabase
+      .from("payments")
+      .select("*")
+      .order(
+        "payment_date",
+        {
+          ascending: false,
+        }
+      );
+
+    if (error) {
+      console.error(
+        "FETCH PAYMENTS ERROR:",
+        error
+      );
+
+      throw error;
+    }
+
+    return (
+      data ?? []
+    ).map(
+      (row) =>
+        mapPayment(row)
     );
-  }
+  };
 
-  const {
-    data: paymentRow,
-    error: paymentError,
-  } = await supabase
-    .from("payments")
-    .insert({
-      bill_id:
-        billRow.id,
+/* =========================================================
+   FETCH BILLING DATA
+========================================================= */
 
-      amount:
-        Number(
-          input.amount
-        ),
+export const fetchBillingData =
+  async (): Promise<{
+    bills: Bill[];
+    payments: Payment[];
+  }> => {
+    const [
+      bills,
+      payments,
+    ] = await Promise.all([
+      fetchBills(),
+      fetchPayments(),
+    ]);
 
-      method:
-        input.method,
+    return {
+      bills,
+      payments,
+    };
+  };
 
-      payment_date:
-        new Date().toISOString(),
+/* =========================================================
+   CREATE BILL
+========================================================= */
 
-      notes: null,
-    })
-    .select("*")
-    .single();
+export const createBill =
+  async (
+    bill: Bill
+  ): Promise<Bill> => {
+    try {
+      const shopId =
+        await getCurrentShopId();
 
-  if (paymentError) {
-    throw new Error(
-      paymentError.message
+      const databaseBill =
+        mapBillToDatabase(
+          bill,
+          shopId
+        );
+
+      console.log(
+        "================================"
+      );
+
+      console.log(
+        "CREATE BILL SHOP ID:",
+        shopId
+      );
+
+      console.log(
+        "CREATE BILL PAYLOAD:",
+        databaseBill
+      );
+
+      console.log(
+        "================================"
+      );
+
+      const {
+        data,
+        error,
+      } = await supabase
+        .from("bills")
+        .insert(
+          databaseBill
+        )
+        .select("*")
+        .single();
+
+      if (error) {
+        console.error(
+          "CREATE BILL DATABASE ERROR:",
+          error
+        );
+
+        throw error;
+      }
+
+      if (!data) {
+        throw new Error(
+          "Bill was created but no data was returned."
+        );
+      }
+
+      const databaseBillMapped =
+        mapBill(data);
+
+      return {
+        ...databaseBillMapped,
+
+        customerName:
+          bill.customerName,
+
+        item:
+          bill.item,
+
+        quantity:
+          bill.quantity,
+
+        price:
+          bill.price,
+
+        paymentMethod:
+          bill.paymentMethod,
+
+        billNumber:
+          databaseBillMapped.billNumber ||
+          bill.billNumber ||
+          (
+            bill.id.startsWith("BILL-")
+              ? bill.id
+              : undefined
+          ),
+      };
+    } catch (error) {
+      console.error(
+        "CREATE BILL SERVICE ERROR:",
+        error
+      );
+
+      throw error;
+    }
+  };
+
+/* =========================================================
+   UPDATE BILL
+========================================================= */
+
+export const updateBill =
+  async (
+    bill: Bill
+  ): Promise<Bill> => {
+    try {
+      const shopId =
+        await getCurrentShopId();
+
+      const databaseBill =
+        mapBillToDatabase(
+          bill,
+          shopId
+        );
+
+      /*
+        IMPORTANT:
+
+        For existing bills, do NOT update
+        bill_number from the UUID.
+
+        Existing bill_number is already stored
+        correctly in Supabase.
+      */
+      delete (databaseBill as any).bill_number;
+
+      const {
+        data,
+        error,
+      } = await supabase
+        .from("bills")
+        .update(
+          databaseBill
+        )
+        .eq(
+          "id",
+          bill.id
+        )
+        .select("*")
+        .single();
+
+      if (error) {
+        console.error(
+          "UPDATE BILL ERROR:",
+          error
+        );
+
+        throw error;
+      }
+
+      if (!data) {
+        throw new Error(
+          "Bill update returned no data."
+        );
+      }
+
+      const databaseBillMapped =
+        mapBill(data);
+
+      return {
+        ...databaseBillMapped,
+
+        customerName:
+          bill.customerName,
+
+        item:
+          bill.item,
+
+        quantity:
+          bill.quantity,
+
+        price:
+          bill.price,
+
+        paymentMethod:
+          bill.paymentMethod,
+
+        billNumber:
+          databaseBillMapped.billNumber ||
+          bill.billNumber,
+      };
+    } catch (error) {
+      console.error(
+        "UPDATE BILL SERVICE ERROR:",
+        error
+      );
+
+      throw error;
+    }
+  };
+
+/* =========================================================
+   CREATE PAYMENT
+========================================================= */
+
+export const createPayment =
+  async (
+    payment: Payment
+  ): Promise<Payment> => {
+    try {
+      console.log(
+        "CREATE PAYMENT:",
+        payment
+      );
+
+      const {
+        data,
+        error,
+      } = await supabase
+        .from("payments")
+        .insert(
+          mapPaymentToDatabase(
+            payment
+          )
+        )
+        .select("*")
+        .single();
+
+      if (error) {
+        console.error(
+          "CREATE PAYMENT ERROR:",
+          error
+        );
+
+        throw error;
+      }
+
+      if (!data) {
+        throw new Error(
+          "Payment was created but no data was returned."
+        );
+      }
+
+      return mapPayment(
+        data
+      );
+    } catch (error) {
+      console.error(
+        "CREATE PAYMENT SERVICE ERROR:",
+        error
+      );
+
+      throw error;
+    }
+  };
+
+/* =========================================================
+   UPDATE PAYMENT
+========================================================= */
+
+export const updatePayment =
+  async (
+    payment: Payment
+  ): Promise<Payment> => {
+    const databasePayment =
+      mapPaymentToDatabase(
+        payment
+      );
+
+    const {
+      data,
+      error,
+    } = await supabase
+      .from("payments")
+      .update(
+        databasePayment
+      )
+      .eq(
+        "id",
+        payment.id
+      )
+      .select("*")
+      .single();
+
+    if (error) {
+      console.error(
+        "UPDATE PAYMENT ERROR:",
+        error
+      );
+
+      throw error;
+    }
+
+    if (!data) {
+      throw new Error(
+        "Payment update returned no data."
+      );
+    }
+
+    return mapPayment(
+      data
     );
-  }
+  };
 
-  if (!paymentRow) {
-    throw new Error(
-      "Payment was not returned after saving."
-    );
-  }
+/* =========================================================
+   DELETE PAYMENT
+========================================================= */
 
-  const allPayments = [
-    ...(existingPayments ?? []),
-    paymentRow,
-  ];
-
-  const totalPaid =
-    allPayments.reduce(
-      (sum, payment) =>
-        sum +
-        Number(
-          payment.amount || 0
-        ),
-      0
-    );
-
-  const status =
-    getBillStatus(
-      total,
-      totalPaid
-    );
-
-  const {
-    data: updatedBillRow,
-    error: updateError,
-  } = await supabase
-    .from("bills")
-    .update({
-      status,
-
-      updated_at:
-        new Date().toISOString(),
-    })
-    .eq(
-      "id",
-      billRow.id
-    )
-    .select(`
-      *,
-      customers(name),
-      orders(item, quantity, price)
-    `)
-    .single();
-
-  if (updateError) {
-    await supabase
+export const deletePayment =
+  async (
+    paymentId: string
+  ): Promise<void> => {
+    const {
+      error,
+    } = await supabase
       .from("payments")
       .delete()
       .eq(
         "id",
-        paymentRow.id
+        paymentId
       );
 
-    throw new Error(
-      updateError.message
-    );
-  }
+    if (error) {
+      console.error(
+        "DELETE PAYMENT ERROR:",
+        error
+      );
 
-  const bill =
-    mapBill(
-      updatedBillRow,
-      allPayments
-    );
-
-  return {
-    payment:
-      mapPayment(
-        paymentRow,
-        billRow.bill_number
-      ),
-
-    bill,
+      throw error;
+    }
   };
-}
+
+/* =========================================================
+   DELETE BILL
+========================================================= */
+
+export const deleteBill =
+  async (
+    billId: string
+  ): Promise<void> => {
+    const {
+      error,
+    } = await supabase
+      .from("bills")
+      .delete()
+      .eq(
+        "id",
+        billId
+      );
+
+    if (error) {
+      console.error(
+        "DELETE BILL ERROR:",
+        error
+      );
+
+      throw error;
+    }
+  };

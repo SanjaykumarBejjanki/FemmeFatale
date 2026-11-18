@@ -39,3 +39,45 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Project backups
+*.bak
+*.backup
+*.before-*
+*.back-up-*
+*.tmp
+
+# Backup archives
+*.zip
+
+# Local backup files
+App-backup-*
+
+# Ignore backup files with backup/before in their names
+*backup*
+*before-*
+*.bak
+*.tmp
+
+# Ignore backup archives
+*.zip
+
+
+# Temporary development files
+*.pre-style-patch-*
+*rowgap-*
+*customer-final-*
+*assets-*
+*photo-delete-*
+*save-patch-*
+check-*.js
+fix-*.cjs
+repair-*.cjs
+patch-*.ps1
+tsconfig-before-*
+

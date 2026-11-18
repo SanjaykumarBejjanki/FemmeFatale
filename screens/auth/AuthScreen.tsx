@@ -1,137 +1,252 @@
-import React, { useState } from "react";
+﻿import React, { useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   KeyboardAvoidingView,
   Platform,
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
+  TouchableOpacity,
   View,
 } from "react-native";
+
 import { supabase } from "../../lib/supabase";
+
+const colors = {
+  PrimaryWine: "#8B1238",
+  Magenta: "#C2185B",
+  Gold: "#C69A3A",
+  Cream: "#FFF9F2",
+  SoftPink: "#FCE8F0",
+  DarkText: "#242124",
+  White: "#FFFFFF",
+  Muted: "#777777",
+  Border: "#E8DDE2",
+  Error: "#B3261E",
+};
 
 type AuthMode = "login" | "signup";
 
-export default function AuthScreen() {
+type AuthScreenProps = {
+  onAuthenticated?: () => void;
+};
+
+export default function AuthScreen({
+  onAuthenticated,
+}: AuthScreenProps) {
   const [mode, setMode] = useState<AuthMode>("login");
 
-  const [fullName, setFullName] = useState("");
-  const [shopName, setShopName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [fullName, setFullName] = useState("");
 
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  const isSignup = mode === "signup";
+  const [emailError, setEmailError] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [nameError, setNameError] = useState("");
 
-  const resetFields = () => {
-    setFullName("");
-    setShopName("");
-    setEmail("");
-    setPassword("");
-    setShowPassword(false);
+  const clearErrors = () => {
+    setEmailError("");
+    setPasswordError("");
+    setNameError("");
   };
 
-  const switchMode = (newMode: AuthMode) => {
-    resetFields();
-    setMode(newMode);
+  const switchMode = (nextMode: AuthMode) => {
+    setMode(nextMode);
+    clearErrors();
+    setPassword("");
+  };
+
+  const validateEmail = (value: string) => {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
   };
 
   const validateForm = () => {
-    if (isSignup && !fullName.trim()) {
-      Alert.alert("Missing name", "Please enter your full name.");
-      return false;
-    }
+    let valid = true;
 
-    if (isSignup && !shopName.trim()) {
-      Alert.alert("Missing shop name", "Please enter your shop name.");
-      return false;
-    }
+    clearErrors();
 
-    if (!email.trim()) {
-      Alert.alert("Missing email", "Please enter your email address.");
-      return false;
-    }
+    const trimmedEmail = email.trim();
 
-    if (!email.includes("@")) {
-      Alert.alert("Invalid email", "Please enter a valid email address.");
-      return false;
+    if (!trimmedEmail) {
+      setEmailError("Email is required.");
+      valid = false;
+    } else if (!validateEmail(trimmedEmail)) {
+      setEmailError("Please enter a valid email address.");
+      valid = false;
     }
 
     if (!password) {
-      Alert.alert("Missing password", "Please enter your password.");
-      return false;
+      setPasswordError("Password is required.");
+      valid = false;
+    } else if (password.length < 6) {
+      setPasswordError("Password must contain at least 6 characters.");
+      valid = false;
     }
 
-    if (password.length < 8) {
-      Alert.alert(
-        "Password too short",
-        "Password must contain at least 8 characters."
-      );
-      return false;
+    if (mode === "signup" && !fullName.trim()) {
+      setNameError("Full name is required.");
+      valid = false;
     }
 
-    return true;
+    return valid;
   };
 
-  const handleAuth = async () => {
-    if (!validateForm()) {
+  const handleLogin = async () => {
+    if (!validateForm()) return;
+
+    try {
+      setLoading(true);
+
+      const { data, error } =
+        await supabase.auth.signInWithPassword({
+          email: email.trim().toLowerCase(),
+          password,
+        });
+
+      if (error) {
+        throw error;
+      }
+
+      if (data.session) {
+        onAuthenticated?.();
+      }
+    } catch (error: any) {
+      console.error("LOGIN ERROR:", error);
+
+      let message =
+        error?.message ||
+        "Unable to sign in. Please try again.";
+
+      if (
+        message.toLowerCase().includes("invalid login credentials")
+      ) {
+        message =
+          "Invalid email or password. Please check your details.";
+      }
+
+      Alert.alert("Login Failed", message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSignup = async () => {
+    if (!validateForm()) return;
+
+    try {
+      setLoading(true);
+
+      const { data, error } = await supabase.auth.signUp({
+        email: email.trim().toLowerCase(),
+        password,
+        options: {
+          data: {
+            full_name: fullName.trim(),
+          },
+        },
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      if (data.session) {
+        Alert.alert(
+          "Account Created",
+          "Your Femme Fatale Boutique account has been created."
+        );
+
+        onAuthenticated?.();
+        return;
+      }
+
+      Alert.alert(
+        "Account Created",
+        "Your account has been created. Please check your email to verify your account before logging in.",
+        [
+          {
+            text: "OK",
+            onPress: () => {
+              setMode("login");
+              setPassword("");
+            },
+          },
+        ]
+      );
+    } catch (error: any) {
+      console.error("SIGNUP ERROR:", error);
+
+      let message =
+        error?.message ||
+        "Unable to create your account. Please try again.";
+
+      if (
+        message.toLowerCase().includes("user already registered")
+      ) {
+        message =
+          "An account with this email already exists. Please log in.";
+      }
+
+      Alert.alert("Sign Up Failed", message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmit = async () => {
+    if (loading) return;
+
+    if (mode === "login") {
+      await handleLogin();
+    } else {
+      await handleSignup();
+    }
+  };
+
+  const handleForgotPassword = async () => {
+    const trimmedEmail = email.trim();
+
+    if (!trimmedEmail) {
+      setEmailError(
+        "Enter your email address first to reset your password."
+      );
       return;
     }
 
-    setLoading(true);
+    if (!validateEmail(trimmedEmail)) {
+      setEmailError("Please enter a valid email address.");
+      return;
+    }
 
     try {
-      if (isSignup) {
-        const { data, error } = await supabase.auth.signUp({
-          email: email.trim().toLowerCase(),
-          password,
-          options: {
-            data: {
-              full_name: fullName.trim(),
-              shop_name: shopName.trim(),
-            },
-          },
-        });
+      setLoading(true);
 
-        if (error) {
-          throw error;
-        }
+      const { error } =
+        await supabase.auth.resetPasswordForEmail(
+          trimmedEmail.toLowerCase()
+        );
 
-        if (data.session) {
-          Alert.alert(
-            "Account created",
-            "Your FemmeBill account has been created successfully."
-          );
-        } else {
-          Alert.alert(
-            "Check your email",
-            "Your account was created. Please check your email and confirm your email address before logging in."
-          );
-        }
-
-        setPassword("");
-        setMode("login");
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({
-          email: email.trim().toLowerCase(),
-          password,
-        });
-
-        if (error) {
-          throw error;
-        }
-
-        Alert.alert("Welcome back", "You have successfully logged in.");
+      if (error) {
+        throw error;
       }
-    } catch (error: any) {
-      const message = error?.message || "Something went wrong.";
 
-      Alert.alert("Authentication failed", message);
+      Alert.alert(
+        "Reset Link Sent",
+        "If an account exists for this email, a password reset link has been sent."
+      );
+    } catch (error: any) {
+      console.error("PASSWORD RESET ERROR:", error);
+
+      Alert.alert(
+        "Reset Password",
+        error?.message ||
+          "Unable to send the password reset email."
+      );
     } finally {
       setLoading(false);
     }
@@ -140,28 +255,41 @@ export default function AuthScreen() {
   return (
     <KeyboardAvoidingView
       style={styles.container}
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      behavior={
+        Platform.OS === "ios" ? "padding" : "height"
+      }
     >
       <ScrollView
         contentContainerStyle={styles.scrollContent}
         keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
       >
-        <View style={styles.logoCircle}>
-          <Text style={styles.logoText}>F</Text>
+        <View style={styles.brandSection}>
+          <View style={styles.logoCircle}>
+            <Text style={styles.logoText}>FF</Text>
+          </View>
+
+          <Text style={styles.brandName}>
+            Femme Fatale
+          </Text>
+
+          <Text style={styles.brandSubName}>
+            BOUTIQUE
+          </Text>
+
+          <Text style={styles.tagline}>
+            Style Speaks Louder â™¡
+          </Text>
         </View>
-
-        <Text style={styles.title}>FemmeBill</Text>
-
-        <Text style={styles.subtitle}>
-          Smart tailoring & boutique management
-        </Text>
 
         <View style={styles.card}>
           <View style={styles.modeContainer}>
-            <Pressable
+            <TouchableOpacity
+              activeOpacity={0.8}
               style={[
                 styles.modeButton,
-                mode === "login" && styles.modeButtonActive,
+                mode === "login" &&
+                  styles.modeButtonActive,
               ]}
               onPress={() => switchMode("login")}
               disabled={loading}
@@ -169,17 +297,20 @@ export default function AuthScreen() {
               <Text
                 style={[
                   styles.modeText,
-                  mode === "login" && styles.modeTextActive,
+                  mode === "login" &&
+                    styles.modeTextActive,
                 ]}
               >
                 Login
               </Text>
-            </Pressable>
+            </TouchableOpacity>
 
-            <Pressable
+            <TouchableOpacity
+              activeOpacity={0.8}
               style={[
                 styles.modeButton,
-                mode === "signup" && styles.modeButtonActive,
+                mode === "signup" &&
+                  styles.modeButtonActive,
               ]}
               onPress={() => switchMode("signup")}
               disabled={loading}
@@ -187,126 +318,204 @@ export default function AuthScreen() {
               <Text
                 style={[
                   styles.modeText,
-                  mode === "signup" && styles.modeTextActive,
+                  mode === "signup" &&
+                    styles.modeTextActive,
                 ]}
               >
                 Create Account
               </Text>
-            </Pressable>
+            </TouchableOpacity>
           </View>
 
-          {isSignup && (
-            <>
-              <Text style={styles.label}>Full Name</Text>
+          <Text style={styles.heading}>
+            {mode === "login"
+              ? "Welcome Back"
+              : "Create Your Account"}
+          </Text>
+
+          <Text style={styles.description}>
+            {mode === "login"
+              ? "Sign in to manage your boutique."
+              : "Set up your boutique management account."}
+          </Text>
+
+          {mode === "signup" && (
+            <View style={styles.fieldContainer}>
+              <Text style={styles.label}>
+                Full Name
+              </Text>
 
               <TextInput
-                style={styles.input}
-                placeholder="Enter your full name"
-                placeholderTextColor="#999"
                 value={fullName}
-                onChangeText={setFullName}
+                onChangeText={(value) => {
+                  setFullName(value);
+                  if (nameError) setNameError("");
+                }}
+                placeholder="Enter your full name"
+                placeholderTextColor="#A59BA0"
+                style={[
+                  styles.input,
+                  nameError && styles.inputError,
+                ]}
                 autoCapitalize="words"
                 editable={!loading}
               />
 
-              <Text style={styles.label}>Shop Name</Text>
-
-              <TextInput
-                style={styles.input}
-                placeholder="Enter your shop name"
-                placeholderTextColor="#999"
-                value={shopName}
-                onChangeText={setShopName}
-                autoCapitalize="words"
-                editable={!loading}
-              />
-            </>
+              {!!nameError && (
+                <Text style={styles.errorText}>
+                  {nameError}
+                </Text>
+              )}
+            </View>
           )}
 
-          <Text style={styles.label}>Email</Text>
+          <View style={styles.fieldContainer}>
+            <Text style={styles.label}>
+              Email Address
+            </Text>
 
-          <TextInput
-            style={styles.input}
-            placeholder="Enter your email"
-            placeholderTextColor="#999"
-            value={email}
-            onChangeText={setEmail}
-            keyboardType="email-address"
-            autoCapitalize="none"
-            autoCorrect={false}
-            editable={!loading}
-          />
-
-          <Text style={styles.label}>Password</Text>
-
-          <View style={styles.passwordContainer}>
             <TextInput
-              style={styles.passwordInput}
-              placeholder="Enter your password"
-              placeholderTextColor="#999"
-              value={password}
-              onChangeText={setPassword}
-              secureTextEntry={!showPassword}
+              value={email}
+              onChangeText={(value) => {
+                setEmail(value);
+                if (emailError) setEmailError("");
+              }}
+              placeholder="Enter your email"
+              placeholderTextColor="#A59BA0"
+              style={[
+                styles.input,
+                emailError && styles.inputError,
+              ]}
+              keyboardType="email-address"
               autoCapitalize="none"
+              autoCorrect={false}
               editable={!loading}
             />
 
-            <Pressable
-              style={styles.showButton}
-              onPress={() => setShowPassword((value) => !value)}
-              disabled={loading}
-            >
-              <Text style={styles.showText}>
-                {showPassword ? "Hide" : "Show"}
+            {!!emailError && (
+              <Text style={styles.errorText}>
+                {emailError}
               </Text>
-            </Pressable>
+            )}
           </View>
 
-          {isSignup && (
-            <Text style={styles.passwordHint}>
-              Password must contain at least 8 characters.
-            </Text>
-          )}
+          <View style={styles.fieldContainer}>
+            <View style={styles.passwordLabelRow}>
+              <Text style={styles.label}>
+                Password
+              </Text>
 
-          <Pressable
-            style={({ pressed }) => [
-              styles.primaryButton,
-              pressed && styles.primaryButtonPressed,
-              loading && styles.primaryButtonDisabled,
+              {mode === "login" && (
+                <TouchableOpacity
+                  onPress={handleForgotPassword}
+                  disabled={loading}
+                >
+                  <Text style={styles.forgotText}>
+                    Forgot Password?
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            <View
+              style={[
+                styles.passwordWrapper,
+                passwordError &&
+                  styles.inputError,
+              ]}
+            >
+              <TextInput
+                value={password}
+                onChangeText={(value) => {
+                  setPassword(value);
+                  if (passwordError) {
+                    setPasswordError("");
+                  }
+                }}
+                placeholder="Enter your password"
+                placeholderTextColor="#A59BA0"
+                style={styles.passwordInput}
+                secureTextEntry={!showPassword}
+                autoCapitalize="none"
+                autoCorrect={false}
+                editable={!loading}
+              />
+
+              <TouchableOpacity
+                style={styles.showButton}
+                onPress={() =>
+                  setShowPassword((previous) => !previous)
+                }
+                disabled={loading}
+              >
+                <Text style={styles.showText}>
+                  {showPassword ? "Hide" : "Show"}
+                </Text>
+              </TouchableOpacity>
+            </View>
+
+            {!!passwordError && (
+              <Text style={styles.errorText}>
+                {passwordError}
+              </Text>
+            )}
+          </View>
+
+          <TouchableOpacity
+            activeOpacity={0.85}
+            style={[
+              styles.submitButton,
+              loading && styles.submitButtonDisabled,
             ]}
-            onPress={handleAuth}
+            onPress={handleSubmit}
             disabled={loading}
           >
             {loading ? (
-              <ActivityIndicator color="#ffffff" />
+              <ActivityIndicator
+                size="small"
+                color={colors.White}
+              />
             ) : (
-              <Text style={styles.primaryButtonText}>
-                {isSignup ? "Create Account" : "Login"}
+              <Text style={styles.submitText}>
+                {mode === "login"
+                  ? "Login"
+                  : "Create Account"}
               </Text>
             )}
-          </Pressable>
+          </TouchableOpacity>
 
           <View style={styles.switchContainer}>
             <Text style={styles.switchText}>
-              {isSignup
-                ? "Already have a FemmeBill account?"
-                : "Don't have a FemmeBill account?"}
+              {mode === "login"
+                ? "Don't have an account?"
+                : "Already have an account?"}
             </Text>
 
-            <Pressable
-              onPress={() => switchMode(isSignup ? "login" : "signup")}
+            <TouchableOpacity
+              onPress={() =>
+                switchMode(
+                  mode === "login"
+                    ? "signup"
+                    : "login"
+                )
+              }
               disabled={loading}
             >
-              <Text style={styles.switchLink}>
-                {isSignup ? " Login" : " Create Account"}
+              <Text style={styles.switchAction}>
+                {mode === "login"
+                  ? " Create Account"
+                  : " Login"}
               </Text>
-            </Pressable>
+            </TouchableOpacity>
           </View>
         </View>
 
         <Text style={styles.footerText}>
-          Your shop data is protected with Supabase authentication and
-          database security.
+          Femme Fatale Boutique
+        </Text>
+
+        <Text style={styles.footerSubText}>
+          Boutique Management System
         </Text>
       </ScrollView>
     </KeyboardAvoidingView>
@@ -316,203 +525,254 @@ export default function AuthScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#f7f4f8",
+    backgroundColor: "#FFF5F8",
   },
 
   scrollContent: {
     flexGrow: 1,
     justifyContent: "center",
     alignItems: "center",
-    padding: 24,
+    paddingHorizontal: 20,
+    paddingVertical: 18,
+  },
+
+  brandSection: {
+    alignItems: "center",
+    marginBottom: 18,
   },
 
   logoCircle: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: "#6d3f73",
+    width: 62,
+    height: 62,
+    borderRadius: 31,
+    backgroundColor: "#B51655",
     justifyContent: "center",
     alignItems: "center",
-    marginBottom: 14,
+    marginBottom: 9,
+    borderWidth: 2,
+    borderColor: "#E7B7C9",
   },
 
   logoText: {
-    color: "#ffffff",
-    fontSize: 34,
+    color: "#FFFFFF",
+    fontSize: 21,
     fontWeight: "800",
+    letterSpacing: 1,
   },
 
-  title: {
-    fontSize: 32,
+  brandName: {
+    color: "#B51655",
+    fontSize: 27,
     fontWeight: "800",
-    color: "#2d2330",
+    letterSpacing: 0.3,
   },
 
-  subtitle: {
-    fontSize: 14,
-    color: "#77707a",
+  brandSubName: {
+    color: "#A47A36",
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 4,
+    marginTop: 2,
+  },
+
+  tagline: {
+    color: "#9A647A",
+    fontSize: 12,
     marginTop: 6,
-    marginBottom: 24,
-    textAlign: "center",
+    fontStyle: "italic",
   },
 
   card: {
     width: "100%",
-    maxWidth: 460,
-    backgroundColor: "#ffffff",
+    maxWidth: 480,
+    alignSelf: "center",
+    backgroundColor: "#FFFFFF",
     borderRadius: 22,
-    padding: 22,
-    shadowColor: "#000000",
+    paddingHorizontal: 20,
+    paddingVertical: 18,
+    borderWidth: 1,
+    borderColor: "#F0D5E0",
+    shadowColor: "#8F123F",
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
     shadowOffset: {
       width: 0,
       height: 4,
     },
-    shadowOpacity: 0.08,
-    shadowRadius: 14,
-    elevation: 4,
+    elevation: 3,
   },
 
   modeContainer: {
     flexDirection: "row",
-    backgroundColor: "#f1edf2",
+    backgroundColor: "#FFF0F5",
     borderRadius: 12,
     padding: 4,
-    marginBottom: 24,
+    marginBottom: 18,
   },
 
   modeButton: {
     flex: 1,
-    paddingVertical: 11,
-    alignItems: "center",
+    paddingVertical: 10,
     borderRadius: 9,
+    alignItems: "center",
+    justifyContent: "center",
   },
 
   modeButtonActive: {
-    backgroundColor: "#ffffff",
-    shadowColor: "#000000",
-    shadowOffset: {
-      width: 0,
-      height: 1,
-    },
-    shadowOpacity: 0.08,
-    shadowRadius: 3,
-    elevation: 2,
+    backgroundColor: "#B51655",
   },
 
   modeText: {
-    color: "#77707a",
+    color: "#B51655",
     fontSize: 14,
-    fontWeight: "600",
+    fontWeight: "700",
   },
 
   modeTextActive: {
-    color: "#6d3f73",
+    color: "#FFFFFF",
+  },
+
+  heading: {
+    color: "#242124",
+    fontSize: 23,
     fontWeight: "800",
+    marginBottom: 5,
+  },
+
+  description: {
+    color: "#777078",
+    fontSize: 13,
+    marginBottom: 18,
+    lineHeight: 19,
+  },
+
+  fieldContainer: {
+    marginBottom: 14,
   },
 
   label: {
-    fontSize: 14,
+    color: "#30262B",
+    fontSize: 13,
     fontWeight: "700",
-    color: "#3c343e",
     marginBottom: 7,
-    marginTop: 10,
+  },
+
+  passwordLabelRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 7,
+  },
+
+  forgotText: {
+    color: "#B51655",
+    fontSize: 12,
+    fontWeight: "700",
   },
 
   input: {
-    width: "100%",
     height: 50,
     borderWidth: 1,
-    borderColor: "#ddd6df",
+    borderColor: "#E8D5DE",
     borderRadius: 12,
-    paddingHorizontal: 15,
+    paddingHorizontal: 14,
+    color: "#242124",
+    backgroundColor: "#FFFCFE",
     fontSize: 15,
-    color: "#29232b",
-    backgroundColor: "#ffffff",
   },
 
-  passwordContainer: {
-    width: "100%",
+  passwordWrapper: {
     height: 50,
     borderWidth: 1,
-    borderColor: "#ddd6df",
+    borderColor: "#E8D5DE",
     borderRadius: 12,
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#ffffff",
+    backgroundColor: "#FFFCFE",
   },
 
   passwordInput: {
     flex: 1,
     height: "100%",
-    paddingHorizontal: 15,
+    paddingHorizontal: 14,
+    color: "#242124",
     fontSize: 15,
-    color: "#29232b",
   },
 
   showButton: {
     paddingHorizontal: 14,
+    height: "100%",
+    justifyContent: "center",
   },
 
   showText: {
-    color: "#6d3f73",
-    fontSize: 13,
-    fontWeight: "700",
-  },
-
-  passwordHint: {
-    color: "#8a828c",
+    color: "#B51655",
     fontSize: 12,
-    marginTop: 7,
+    fontWeight: "800",
   },
 
-  primaryButton: {
-    height: 52,
+  inputError: {
+    borderColor: "#B3261E",
+    borderWidth: 1.5,
+  },
+
+  errorText: {
+    color: "#B3261E",
+    fontSize: 12,
+    marginTop: 5,
+  },
+
+  submitButton: {
+    minHeight: 52,
     borderRadius: 13,
-    backgroundColor: "#6d3f73",
+    backgroundColor: "#B51655",
     justifyContent: "center",
     alignItems: "center",
-    marginTop: 24,
+    marginTop: 4,
   },
 
-  primaryButtonPressed: {
-    opacity: 0.85,
+  submitButtonDisabled: {
+    opacity: 0.7,
   },
 
-  primaryButtonDisabled: {
-    opacity: 0.65,
-  },
-
-  primaryButtonText: {
-    color: "#ffffff",
+  submitText: {
+    color: "#FFFFFF",
     fontSize: 16,
     fontWeight: "800",
   },
 
   switchContainer: {
     flexDirection: "row",
+    flexWrap: "wrap",
     justifyContent: "center",
     alignItems: "center",
-    flexWrap: "wrap",
-    marginTop: 20,
+    marginTop: 17,
   },
 
   switchText: {
-    color: "#77707a",
+    color: "#777078",
     fontSize: 13,
   },
 
-  switchLink: {
-    color: "#6d3f73",
+  switchAction: {
+    color: "#B51655",
     fontSize: 13,
     fontWeight: "800",
   },
 
   footerText: {
-    maxWidth: 420,
     textAlign: "center",
-    color: "#918a92",
+    color: "#B51655",
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: 16,
+  },
+
+  footerSubText: {
+    textAlign: "center",
+    color: "#9A8C93",
     fontSize: 11,
-    lineHeight: 17,
-    marginTop: 22,
+    marginTop: 3,
   },
 });
+

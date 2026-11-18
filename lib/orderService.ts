@@ -1,872 +1,406 @@
-import { supabase } from "./supabase";
+﻿import { supabase } from "./supabase";
 
-import type {
-  Order,
-  MeasurementSnapshot,
-} from "../screens/OrdersScreen";
+export type OrderStatus =
+  | "New"
+  | "Measurement"
+  | "Cutting"
+  | "Stitching"
+  | "Trial"
+  | "Ready"
+  | "Delivered";
 
-/* =========================================================
-   DATE HELPERS
-========================================================= */
+export type MeasurementSnapshot = {
+  id: string;
+  date: string;
+  type: string;
+  bust: string;
+  waist: string;
+  hip: string;
+  shoulder: string;
+  sleeveLength: string;
+  blouseLength: string;
+  frontNeck: string;
+  backNeck: string;
+  armhole: string;
+  pantLength: string;
+  notes: string;
+};
 
-function formatDisplayDate(value: string | null): string {
-  if (!value) return "";
+export type Order = {
+  id: string;
+  orderNumber?: string;
+  customerId: string;
+  customerName: string;
+  item: string;
+  measurementId: string;
+  measurementUsed: string;
+  measurementSnapshot: MeasurementSnapshot | null;
+  quantity: number;
+  price: number;
+  orderDate: string;
+  deliveryDate: string;
+  status: OrderStatus;
+  notes: string;
+};
 
-  const match = value.match(
-    /^(\d{4})-(\d{2})-(\d{2})$/
-  );
+type OrderRow = {
+  id: string;
+  order_number: string | null;
+  customer_id: string;
+  customer_name: string | null;
+  item: string | null;
+  measurement_id: string | null;
+  measurement_used: string | null;
+  measurement_snapshot: MeasurementSnapshot | null;
+  quantity: number | null;
+  price: number | null;
+  order_date: string | null;
+  delivery_date: string | null;
+  status: string | null;
+  notes: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
 
-  if (!match) return value;
+const validStatuses: OrderStatus[] = [
+  "New",
+  "Measurement",
+  "Cutting",
+  "Stitching",
+  "Trial",
+  "Ready",
+  "Delivered",
+];
 
-  const [, year, month, day] = match;
-
-  const date = new Date(
-    Number(year),
-    Number(month) - 1,
-    Number(day)
-  );
-
-  return date.toLocaleDateString("en-GB", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-  });
-}
-
-function isValidCalendarDate(
-  year: number,
-  month: number,
-  day: number
-): boolean {
+const normalizeStatus = (
+  status: string | null | undefined
+): OrderStatus => {
   if (
-    !Number.isInteger(year) ||
-    year < 1900 ||
-    year > 2100
+    status &&
+    validStatuses.includes(
+      status as OrderStatus
+    )
   ) {
-    return false;
+    return status as OrderStatus;
   }
 
-  if (
-    !Number.isInteger(month) ||
-    month < 1 ||
-    month > 12
-  ) {
-    return false;
-  }
+  return "New";
+};
 
-  if (
-    !Number.isInteger(day) ||
-    day < 1
-  ) {
-    return false;
-  }
-
-  const daysInMonth = new Date(
-    year,
-    month,
-    0
-  ).getDate();
-
-  return day <= daysInMonth;
-}
-
-function toDatabaseDate(
-  value: string | null | undefined
-): string | null {
-  if (!value?.trim()) {
-    return null;
-  }
-
-  const trimmed = value.trim();
-
-  /* -------------------------------------------------------
-     YYYY-MM-DD
-  ------------------------------------------------------- */
-
-  const isoMatch = trimmed.match(
-    /^(\d{4})-(\d{2})-(\d{2})$/
-  );
-
-  if (isoMatch) {
-    const [, yearText, monthText, dayText] =
-      isoMatch;
-
-    const year = Number(yearText);
-    const month = Number(monthText);
-    const day = Number(dayText);
-
-    if (
-      !isValidCalendarDate(
-        year,
-        month,
-        day
-      )
-    ) {
-      throw new Error(
-        `Invalid date: ${value}`
-      );
-    }
-
-    return `${yearText}-${monthText}-${dayText}`;
-  }
-
-  /* -------------------------------------------------------
-     DD/MM/YYYY
-     Also accepts D/M/YYYY
-  ------------------------------------------------------- */
-
-  const slashMatch = trimmed.match(
-    /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/
-  );
-
-  if (slashMatch) {
-    const [, dayText, monthText, yearText] =
-      slashMatch;
-
-    const day = Number(dayText);
-    const month = Number(monthText);
-    const year = Number(yearText);
-
-    if (
-      !isValidCalendarDate(
-        year,
-        month,
-        day
-      )
-    ) {
-      throw new Error(
-        `Invalid date: ${value}`
-      );
-    }
-
-    return [
-      yearText,
-      String(month).padStart(2, "0"),
-      String(day).padStart(2, "0"),
-    ].join("-");
-  }
-
-  /* -------------------------------------------------------
-     DD Mon YYYY
-     DD Sept YYYY
-     DD September YYYY
-  ------------------------------------------------------- */
-
-  const textDate = trimmed.match(
-    /^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/
-  );
-
-  if (textDate) {
-    const [, dayText, monthText, yearText] =
-      textDate;
-
-    const monthMap: Record<
-      string,
-      number
-    > = {
-      jan: 1,
-      january: 1,
-
-      feb: 2,
-      february: 2,
-
-      mar: 3,
-      march: 3,
-
-      apr: 4,
-      april: 4,
-
-      may: 5,
-
-      jun: 6,
-      june: 6,
-
-      jul: 7,
-      july: 7,
-
-      aug: 8,
-      august: 8,
-
-      sep: 9,
-      sept: 9,
-      september: 9,
-
-      oct: 10,
-      october: 10,
-
-      nov: 11,
-      november: 11,
-
-      dec: 12,
-      december: 12,
-    };
-
-    const month =
-      monthMap[
-        monthText.toLowerCase()
-      ];
-
-    if (!month) {
-      throw new Error(
-        `Invalid date: ${value}`
-      );
-    }
-
-    const day = Number(dayText);
-    const year = Number(yearText);
-
-    if (
-      !isValidCalendarDate(
-        year,
-        month,
-        day
-      )
-    ) {
-      throw new Error(
-        `Invalid date: ${value}`
-      );
-    }
-
-    return [
-      String(year),
-      String(month).padStart(2, "0"),
-      String(day).padStart(2, "0"),
-    ].join("-");
-  }
-
-  /* -------------------------------------------------------
-     JavaScript Date fallback
-  ------------------------------------------------------- */
-
-  const parsed = Date.parse(trimmed);
-
-  if (!Number.isNaN(parsed)) {
-    const date = new Date(parsed);
-
-    const year = date.getFullYear();
-    const month = date.getMonth() + 1;
-    const day = date.getDate();
-
-    if (
-      !isValidCalendarDate(
-        year,
-        month,
-        day
-      )
-    ) {
-      throw new Error(
-        `Invalid date: ${value}`
-      );
-    }
-
-    return [
-      String(year),
-      String(month).padStart(2, "0"),
-      String(day).padStart(2, "0"),
-    ].join("-");
-  }
-
-  throw new Error(
-    `Invalid date: ${value}`
-  );
-}
-
-/* =========================================================
-   SNAPSHOT MAPPING
-========================================================= */
-
-function mapSnapshot(
-  row: any
-): MeasurementSnapshot {
-  return {
-    id:
-      row.measurement_id ||
-      row.id ||
-      "",
-
-    date: formatDisplayDate(
-      row.measurement_date
-    ),
-
-    type:
-      row.measurement_type || "",
-
-    bust:
-      row.bust || "",
-
-    waist:
-      row.waist || "",
-
-    hip:
-      row.hip || "",
-
-    shoulder:
-      row.shoulder || "",
-
-    sleeveLength:
-      row.sleeve_length || "",
-
-    blouseLength:
-      row.blouse_length || "",
-
-    frontNeck:
-      row.front_neck || "",
-
-    backNeck:
-      row.back_neck || "",
-
-    armhole:
-      row.armhole || "",
-
-    pantLength:
-      row.pant_length || "",
-
-    notes:
-      row.notes || "",
-  };
-}
-
-/* =========================================================
-   ORDER MAPPING
-========================================================= */
-
-function mapOrder(
-  row: any,
-  snapshot?: any
-): Order {
-  const customerName =
-    Array.isArray(row.customers)
-      ? row.customers[0]?.name ||
-        "Unknown Customer"
-      : row.customers?.name ||
-        "Unknown Customer";
-
+const mapOrder = (
+  row: OrderRow
+): Order => {
   return {
     id: row.id,
-
     orderNumber:
-      row.order_number,
-
+      row.order_number ?? undefined,
     customerId:
       row.customer_id,
-
-    customerName,
-
+    customerName:
+      row.customer_name ?? "",
     item:
-      row.item,
-
+      row.item ?? "",
     measurementId:
-      row.measurement_id ||
-      snapshot?.measurement_id ||
-      "",
-
-    measurementUsed: snapshot
-      ? `${formatDisplayDate(
-          snapshot.measurement_date
-        )} • ${
-          snapshot.measurement_type ||
-          "Measurement"
-        }`
-      : row.measurement_id
-      ? "Saved measurement"
-      : "No measurement",
-
+      row.measurement_id ?? "",
+    measurementUsed:
+      row.measurement_used ?? "",
     measurementSnapshot:
-      snapshot
-        ? mapSnapshot(snapshot)
-        : null,
-
-    quantity: Number(
-      row.quantity || 1
-    ),
-
-    price: Number(
-      row.price || 0
-    ),
-
+      row.measurement_snapshot ?? null,
+    quantity:
+      Number(row.quantity ?? 1),
+    price:
+      Number(row.price ?? 0),
     orderDate:
-      formatDisplayDate(
-        row.order_date
-      ),
-
+      row.order_date ?? "",
     deliveryDate:
-      formatDisplayDate(
-        row.delivery_date
-      ),
-
+      row.delivery_date ?? "",
     status:
-      row.status,
-
+      normalizeStatus(row.status),
     notes:
-      row.notes || "",
+      row.notes ?? "",
   };
-}
+};
 
-/* =========================================================
-   SHOP ID
-========================================================= */
+/* -------------------------------------------------------
+   DATABASE PAYLOAD
+   ------------------------------------------------------- */
 
-async function getShopId(): Promise<string> {
+const toDatabasePayload = async (
+  order: Order
+) => {
   const {
-    data: { user },
-    error: userError,
-  } = await supabase.auth.getUser();
+    data: shopId,
+    error: shopError,
+  } = await supabase.rpc(
+    "get_my_shop_id"
+  );
 
-  if (userError) {
-    throw new Error(
-      userError.message
+  if (shopError) {
+    console.error(
+      "GET SHOP ID ERROR:",
+      shopError
     );
+
+    throw shopError;
   }
 
-  if (!user) {
-    throw new Error(
-      "You must be logged in."
-    );
-  }
-
-  const {
-    data,
-    error,
-  } = await supabase
-    .from("profiles")
-    .select("shop_id")
-    .eq("id", user.id)
-    .maybeSingle();
-
-  if (error) {
-    throw new Error(
-      error.message
-    );
-  }
-
-  if (!data?.shop_id) {
+  if (!shopId) {
     throw new Error(
       "No shop is connected to this account."
     );
   }
 
-  return data.shop_id;
-}
+  return {
+    shop_id:
+      shopId,
 
-/* =========================================================
+    order_number:
+      order.orderNumber ?? null,
+
+    customer_id:
+      order.customerId,
+
+    item:
+      order.item,
+
+    measurement_id:
+      order.measurementId || null,
+
+    quantity:
+      Number(order.quantity || 1),
+
+    price:
+      Number(order.price || 0),
+
+    order_date:
+      order.orderDate,
+
+    delivery_date:
+      order.deliveryDate,
+
+    status:
+      order.status,
+
+    notes:
+      order.notes,
+  };
+};
+
+/* -------------------------------------------------------
    FETCH ORDERS
-========================================================= */
+   ------------------------------------------------------- */
 
-export async function fetchOrders(): Promise<
-  Order[]
-> {
+export const fetchOrders = async (
+  customerId?: string
+): Promise<Order[]> => {
+  let query = supabase
+    .from("orders")
+    .select("*")
+    .order("created_at", {
+      ascending: false,
+    });
+
+  if (customerId) {
+    query = query.eq(
+      "customer_id",
+      customerId
+    );
+  }
+
+  const {
+    data,
+    error,
+  } = await query;
+
+  if (error) {
+    console.error(
+      "FETCH ORDERS ERROR:",
+      error
+    );
+
+    throw error;
+  }
+
+  const orders = data ?? [];
+
+  if (orders.length === 0) {
+    return [];
+  }
+
+  const customerIds = [
+    ...new Set(
+      orders
+        .map((row: OrderRow) => row.customer_id)
+        .filter(Boolean)
+    ),
+  ];
+
+  const {
+    data: customers,
+    error: customerError,
+  } = await supabase
+    .from("customers")
+    .select("id, name")
+    .in("id", customerIds);
+
+  if (customerError) {
+    console.error(
+      "FETCH ORDER CUSTOMER NAMES ERROR:",
+      customerError
+    );
+
+    throw customerError;
+  }
+
+  const customerMap = new Map(
+    (customers ?? []).map(
+      (customer: { id: string; name: string | null }) => [
+        String(customer.id),
+        customer.name ?? "",
+      ]
+    )
+  );
+
+  return orders.map((row: OrderRow) => {
+    const mappedOrder = mapOrder(row);
+
+    return {
+      ...mappedOrder,
+      customerName:
+        mappedOrder.customerName?.trim() ||
+        String(
+          customerMap.get(
+            String(row.customer_id)
+          ) ?? ""
+        ),
+    };
+  });
+};
+/* -------------------------------------------------------
+   CREATE ORDER
+   ------------------------------------------------------- */
+export const createOrder = async (
+  order: Order
+): Promise<Order> => {
+  const payload =
+    await toDatabasePayload(order);
+
+  console.log(
+    "CREATE ORDER PAYLOAD:",
+    payload
+  );
+
   const {
     data,
     error,
   } = await supabase
     .from("orders")
-    .select(
-      "*, customers(name)"
-    )
-    .order("created_at", {
-      ascending: false,
-    });
+    .insert(payload)
+    .select("*")
+    .single();
+
+  console.log(
+    "CREATE ORDER SUPABASE RESULT:",
+    data
+  );
+
+  console.log(
+    "CREATE ORDER SUPABASE ERROR:",
+    error
+  );
 
   if (error) {
-    throw new Error(
-      error.message
-    );
-  }
-
-  const rows = data ?? [];
-
-  if (rows.length === 0) {
-    return [];
-  }
-
-  const orderIds = rows.map(
-    (row: any) => row.id
-  );
-
-  const {
-    data: snapshotRows,
-    error: snapshotError,
-  } = await supabase
-    .from(
-      "order_measurement_snapshots"
-    )
-    .select("*")
-    .in(
-      "order_id",
-      orderIds
+    console.error(
+      "CREATE ORDER ERROR:",
+      error
     );
 
-  if (snapshotError) {
-    throw new Error(
-      snapshotError.message
-    );
-  }
-
-  const snapshotByOrderId =
-    new Map<string, any>();
-
-  for (
-    const snapshot of
-    snapshotRows ?? []
-  ) {
-    snapshotByOrderId.set(
-      snapshot.order_id,
-      snapshot
-    );
-  }
-
-  return rows.map(
-    (row: any) =>
-      mapOrder(
-        row,
-        snapshotByOrderId.get(
-          row.id
-        )
-      )
-  );
-}
-
-/* =========================================================
-   ORDER NUMBER
-========================================================= */
-
-function createOrderNumber(): string {
-  const now = new Date();
-
-  const year =
-    now.getFullYear();
-
-  const month = String(
-    now.getMonth() + 1
-  ).padStart(2, "0");
-
-  const day = String(
-    now.getDate()
-  ).padStart(2, "0");
-
-  const time = String(
-    Date.now()
-  ).slice(-8);
-
-  return `ORD-${year}${month}${day}-${time}`;
-}
-
-/* =========================================================
-   CREATE ORDER
-========================================================= */
-
-export async function createOrder(
-  input: Order
-): Promise<Order> {
-  const shopId =
-    await getShopId();
-
-  if (!input.customerId) {
-    throw new Error(
-      "Customer is required."
-    );
-  }
-
-  if (!input.item.trim()) {
-    throw new Error(
-      "Item is required."
-    );
-  }
-
-  if (!input.measurementId) {
-    throw new Error(
-      "Measurement is required."
-    );
-  }
-
-  if (
-    !Number.isFinite(
-      input.quantity
-    ) ||
-    input.quantity <= 0
-  ) {
-    throw new Error(
-      "Quantity must be greater than 0."
-    );
-  }
-
-  if (
-    !Number.isFinite(
-      input.price
-    ) ||
-    input.price < 0
-  ) {
-    throw new Error(
-      "Price cannot be negative."
-    );
-  }
-
-  /* -------------------------------------------------------
-     Convert dates before saving
-  ------------------------------------------------------- */
-
-  const orderDate =
-    toDatabaseDate(
-      input.orderDate
-    ) ??
-    new Date()
-      .toISOString()
-      .slice(0, 10);
-
-  const deliveryDate =
-    toDatabaseDate(
-      input.deliveryDate
-    );
-
-  const orderNumber =
-    input.orderNumber?.trim() ||
-    createOrderNumber();
-
-  /* -------------------------------------------------------
-     Save order
-  ------------------------------------------------------- */
-
-  const {
-    data: orderRow,
-    error: orderError,
-  } = await supabase
-    .from("orders")
-    .insert({
-      shop_id:
-        shopId,
-
-      customer_id:
-        input.customerId,
-
-      order_number:
-        orderNumber,
-
-      item:
-        input.item.trim(),
-
-      measurement_id:
-        input.measurementId,
-
-      quantity:
-        Math.trunc(
-          input.quantity
-        ),
-
-      price:
-        Number(
-          input.price
-        ),
-
-      order_date:
-        orderDate,
-
-      delivery_date:
-        deliveryDate,
-
-      status:
-        input.status,
-
-      notes:
-        input.notes.trim() ||
-        null,
-    })
-    .select(
-      "*, customers(name)"
-    )
-    .single();
-
-  if (orderError) {
-    throw new Error(
-      orderError.message
-    );
-  }
-
-  if (!orderRow) {
-    throw new Error(
-      "Order was not returned after saving."
-    );
-  }
-
-  /* -------------------------------------------------------
-     Measurement snapshot
-  ------------------------------------------------------- */
-
-  const snapshot =
-    input.measurementSnapshot;
-
-  if (!snapshot) {
-    await supabase
-      .from("orders")
-      .delete()
-      .eq(
-        "id",
-        orderRow.id
-      );
-
-    throw new Error(
-      "Measurement snapshot is required for this order."
-    );
-  }
-
-  const {
-    data: snapshotRow,
-    error: snapshotError,
-  } = await supabase
-    .from(
-      "order_measurement_snapshots"
-    )
-    .insert({
-      order_id:
-        orderRow.id,
-
-      measurement_id:
-        input.measurementId ||
-        null,
-
-      measurement_date:
-        toDatabaseDate(
-          snapshot.date
-        ),
-
-      measurement_type:
-        snapshot.type ||
-        null,
-
-      bust:
-        snapshot.bust ||
-        null,
-
-      waist:
-        snapshot.waist ||
-        null,
-
-      hip:
-        snapshot.hip ||
-        null,
-
-      shoulder:
-        snapshot.shoulder ||
-        null,
-
-      sleeve_length:
-        snapshot.sleeveLength ||
-        null,
-
-      blouse_length:
-        snapshot.blouseLength ||
-        null,
-
-      front_neck:
-        snapshot.frontNeck ||
-        null,
-
-      back_neck:
-        snapshot.backNeck ||
-        null,
-
-      armhole:
-        snapshot.armhole ||
-        null,
-
-      pant_length:
-        snapshot.pantLength ||
-        null,
-
-      notes:
-        snapshot.notes ||
-        null,
-    })
-    .select("*")
-    .single();
-
-  if (snapshotError) {
-    await supabase
-      .from("orders")
-      .delete()
-      .eq(
-        "id",
-        orderRow.id
-      );
-
-    throw new Error(
-      snapshotError.message
-    );
+    throw error;
   }
 
   return mapOrder(
-    orderRow,
-    snapshotRow
+    data as OrderRow
   );
-}
-
-/* =========================================================
+};
+/* -------------------------------------------------------
    UPDATE ORDER
-========================================================= */
+   ------------------------------------------------------- */
 
-export async function updateOrder(
-  input: Order
-): Promise<Order> {
-  if (!input.id) {
-    throw new Error(
-      "Order ID is required."
-    );
-  }
+export const updateOrder = async (
+  order: Order
+): Promise<Order> => {
+  const payload =
+    await toDatabasePayload(order);
+
+  console.log(
+    "UPDATE ORDER PAYLOAD:",
+    payload
+  );
 
   const {
-    data: orderRow,
-    error: orderError,
+    data,
+    error,
   } = await supabase
     .from("orders")
-    .update({
-      status:
-        input.status,
-
-      updated_at:
-        new Date().toISOString(),
-    })
-    .eq(
-      "id",
-      input.id
-    )
-    .select(
-      "*, customers(name)"
-    )
+    .update(payload)
+    .eq("id", order.id)
+    .select("*")
     .single();
 
-  if (orderError) {
-    throw new Error(
-      orderError.message
+  if (error) {
+    console.error(
+      "UPDATE ORDER ERROR:",
+      error
     );
-  }
 
-  if (!orderRow) {
-    throw new Error(
-      "Order was not returned after updating."
-    );
-  }
-
-  const {
-    data: snapshotRow,
-    error: snapshotError,
-  } = await supabase
-    .from(
-      "order_measurement_snapshots"
-    )
-    .select("*")
-    .eq(
-      "order_id",
-      input.id
-    )
-    .maybeSingle();
-
-  if (snapshotError) {
-    throw new Error(
-      snapshotError.message
-    );
+    throw error;
   }
 
   return mapOrder(
-    orderRow,
-    snapshotRow ?? undefined
+    data as OrderRow
   );
-}
+};
+
+/* -------------------------------------------------------
+   DELETE ORDER
+   ------------------------------------------------------- */
+
+export const deleteOrder = async (
+  orderId: string
+): Promise<void> => {
+  const { data: bill, error: billError } =
+    await supabase
+      .from("bills")
+      .select("id")
+      .eq("order_id", orderId)
+      .maybeSingle();
+
+  if (billError) {
+    console.error(
+      "CHECK BILL BEFORE DELETE ERROR:",
+      billError
+    );
+    throw billError;
+  }
+
+  if (bill) {
+    throw new Error(
+      "This order has a bill and cannot be deleted."
+    );
+  }
+
+  const { error } =
+    await supabase
+      .from("orders")
+      .delete()
+      .eq("id", orderId);
+
+  if (error) {
+    console.error(
+      "DELETE ORDER ERROR:",
+      error
+    );
+    throw error;
+  }
+};
+

@@ -1,10 +1,9 @@
-import React, { useMemo, useState } from "react";
+﻿import React, { useMemo, useState } from "react";
+import * as ImagePicker from "expo-image-picker";
 import {
+  Image,
   Alert,
-  KeyboardAvoidingView,
   Modal,
-  Platform,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
@@ -33,22 +32,43 @@ export type Measurement = {
 export type MeasurementCustomer = {
   id: string;
   name: string;
-  phone?: string;
+  phone: string;
 };
 
 type MeasurementsScreenProps = {
   customer: MeasurementCustomer;
   measurements: Measurement[];
+
   onAddMeasurement: (
     measurement: Omit<Measurement, "id">
   ) => Promise<void> | void;
+
   onUpdateMeasurement: (
     measurementId: string,
     measurement: Omit<Measurement, "id">
   ) => Promise<void> | void;
+
+  onDeleteMeasurement: (
+    measurementId: string
+  ) => Promise<void> | void;
 };
 
-const MEASUREMENT_TYPES = [
+const colors = {
+  PrimaryWine: "#8B1238",
+  Magenta: "#AD1457",
+  Gold: "#C69A3A",
+  Cream: "#FFF9F2",
+  SoftPink: "#FCE8F0",
+  DarkText: "#242124",
+  White: "#FFFFFF",
+  Gray: "#777777",
+  LightGray: "#F4F1F2",
+  Border: "#E8DDE1",
+  Green: "#2E7D32",
+  Red: "#C62828",
+};
+
+const measurementTypes = [
   "Blouse",
   "Chudidar",
   "Dress",
@@ -58,8 +78,7 @@ const MEASUREMENT_TYPES = [
   "Custom",
 ];
 
-const EMPTY_FORM: Omit<Measurement, "id"> = {
-  date: "",
+const emptyForm = {
   type: "Blouse",
   bust: "",
   waist: "",
@@ -74,214 +93,74 @@ const EMPTY_FORM: Omit<Measurement, "id"> = {
   notes: "",
 };
 
-const LABELS: Record<string, string> = {
-  bust: "Bust",
-  waist: "Waist",
-  hip: "Hip",
-  shoulder: "Shoulder",
-  sleeveLength: "Sleeve Length",
-  blouseLength: "Blouse Length",
-  frontNeck: "Front Neck",
-  backNeck: "Back Neck",
-  armhole: "Armhole",
-  pantLength: "Pant Length",
+const formatDate = (value: string) => {
+  if (!value) return "-";
+
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return date.toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
 };
 
-function createDefaultDate() {
-  const now = new Date();
+const dbDate = () => {
+  return new Date().toISOString().split("T")[0];
+};
 
-  const day = String(now.getDate()).padStart(2, "0");
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const year = now.getFullYear();
+const displayToDbDate = (value: string) => {
+  const trimmed = value.trim();
 
-  return `${day}/${month}/${year}`;
-}
+  if (!trimmed) {
+    return dbDate();
+  }
 
-function displayDate(value: string) {
+  const parts = trimmed.split("/");
+
+  if (parts.length === 3) {
+    const [day, month, year] = parts;
+
+    return `${year}-${month.padStart(
+      2,
+      "0"
+    )}-${day.padStart(2, "0")}`;
+  }
+
+  return trimmed;
+};
+
+const dbToDisplayDate = (value: string) => {
   if (!value) return "";
 
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    const [year, month, day] = value.split("-");
-    return `${day}/${month}/${year}`;
+  const parts = value.split("-");
+
+  if (parts.length === 3) {
+    return `${parts[2]}/${parts[1]}/${parts[0]}`;
   }
 
   return value;
-}
-
-function databaseDate(value: string) {
-  const text = value.trim();
-
-  if (/^\d{2}\/\d{2}\/\d{4}$/.test(text)) {
-    const [day, month, year] = text.split("/");
-
-    return `${year}-${month}-${day}`;
-  }
-
-  return text;
-}
-
-function dateValue(value: string) {
-  if (!value) return 0;
-
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    return new Date(value).getTime() || 0;
-  }
-
-  const match = value.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-
-  if (match) {
-    const [, day, month, year] = match;
-
-    return (
-      new Date(
-        Number(year),
-        Number(month) - 1,
-        Number(day)
-      ).getTime() || 0
-    );
-  }
-
-  return 0;
-}
-
-function MeasurementField({
-  label,
-  value,
-  onChangeText,
-}: {
-  label: string;
-  value: string;
-  onChangeText: (value: string) => void;
-}) {
-  return (
-    <View style={styles.field}>
-      <Text style={styles.fieldLabel}>{label}</Text>
-
-      <TextInput
-        value={value}
-        onChangeText={onChangeText}
-        placeholder="0"
-        placeholderTextColor="#B6A9B0"
-        keyboardType="decimal-pad"
-        style={styles.input}
-      />
-    </View>
-  );
-}
-
-function MeasurementCard({
-  measurement,
-  latest,
-  onEdit,
-  onView,
-}: {
-  measurement: Measurement;
-  latest: boolean;
-  onEdit: () => void;
-  onView: () => void;
-}) {
-  const preview = [
-    measurement.bust
-      ? `Bust ${measurement.bust}"`
-      : "",
-    measurement.waist
-      ? `Waist ${measurement.waist}"`
-      : "",
-    measurement.hip
-      ? `Hip ${measurement.hip}"`
-      : "",
-    measurement.shoulder
-      ? `Shoulder ${measurement.shoulder}"`
-      : "",
-  ].filter(Boolean);
-
-  return (
-    <View style={styles.card}>
-      <View style={styles.cardHeader}>
-        <View style={styles.cardLeft}>
-          <View style={styles.measurementIcon}>
-            <Text style={styles.measurementIconText}>M</Text>
-          </View>
-
-          <View style={{ flex: 1 }}>
-            <View style={styles.titleRow}>
-              <Text style={styles.cardTitle}>
-                {measurement.type}
-              </Text>
-
-              {latest && (
-                <View style={styles.latestBadge}>
-                  <Text style={styles.latestBadgeText}>
-                    LATEST
-                  </Text>
-                </View>
-              )}
-            </View>
-
-            <Text style={styles.cardDate}>
-              {displayDate(measurement.date) || "No date"}
-            </Text>
-          </View>
-        </View>
-
-        <TouchableOpacity
-          style={styles.editButton}
-          onPress={onEdit}
-        >
-          <Text style={styles.editButtonText}>Edit</Text>
-        </TouchableOpacity>
-      </View>
-
-      {preview.length > 0 ? (
-        <View style={styles.previewContainer}>
-          {preview.map((item) => (
-            <View
-              key={item}
-              style={styles.previewChip}
-            >
-              <Text style={styles.previewText}>
-                {item}
-              </Text>
-            </View>
-          ))}
-        </View>
-      ) : (
-        <Text style={styles.noMeasurementText}>
-          No measurements entered yet
-        </Text>
-      )}
-
-      {measurement.notes ? (
-        <Text
-          numberOfLines={2}
-          style={styles.cardNotes}
-        >
-          {measurement.notes}
-        </Text>
-      ) : null}
-
-      <TouchableOpacity
-        style={styles.viewButton}
-        onPress={onView}
-      >
-        <Text style={styles.viewButtonText}>
-          View Full Measurement →
-        </Text>
-      </TouchableOpacity>
-    </View>
-  );
-}
+};
 
 export default function MeasurementsScreen({
   customer,
   measurements,
   onAddMeasurement,
   onUpdateMeasurement,
+  onDeleteMeasurement,
 }: MeasurementsScreenProps) {
-  const [modalVisible, setModalVisible] =
+  const [search, setSearch] = useState("");
+  const [typeFilter, setTypeFilter] =
+    useState("All");
+
+  const [showForm, setShowForm] =
     useState(false);
 
-  const [detailsVisible, setDetailsVisible] =
+  const [showDetails, setShowDetails] =
     useState(false);
 
   const [editingMeasurement, setEditingMeasurement] =
@@ -290,87 +169,71 @@ export default function MeasurementsScreen({
   const [selectedMeasurement, setSelectedMeasurement] =
     useState<Measurement | null>(null);
 
-  const [form, setForm] =
-    useState<Omit<Measurement, "id">>(
-      EMPTY_FORM
-    );
+  const [form, setForm] = useState({
+    ...emptyForm,
+  });
 
-  const [selectedType, setSelectedType] =
-    useState("All");
+  const [date, setDate] = useState(
+    dbToDisplayDate(dbDate())
+  );
 
-  const [search, setSearch] =
-    useState("");
+  const [fabricPhotos, setFabricPhotos] = useState<string[]>([]);
+  const [roughNotes, setRoughNotes] = useState("");
 
-  const [saving, setSaving] =
-    useState(false);
+  const filteredMeasurements = useMemo(() => {
+    const query = search.trim().toLowerCase();
 
-  const sortedMeasurements = useMemo(() => {
-    return [...measurements].sort(
-      (a, b) =>
-        dateValue(b.date) -
-        dateValue(a.date)
-    );
-  }, [measurements]);
+    return measurements.filter((measurement) => {
+      const matchesType =
+        typeFilter === "All" ||
+        measurement.type === typeFilter;
+
+      const matchesSearch =
+        !query ||
+        measurement.type
+          .toLowerCase()
+          .includes(query) ||
+        measurement.notes
+          .toLowerCase()
+          .includes(query) ||
+        measurement.date
+          .toLowerCase()
+          .includes(query);
+
+      return matchesType && matchesSearch;
+    });
+  }, [
+    measurements,
+    search,
+    typeFilter,
+  ]);
 
   const latestMeasurement =
-    sortedMeasurements[0] || null;
+    measurements.length > 0
+      ? [...measurements].sort(
+          (a, b) =>
+            new Date(b.date).getTime() -
+            new Date(a.date).getTime()
+        )[0]
+      : null;
 
-  const filteredMeasurements =
-    useMemo(() => {
-      const query =
-        search.trim().toLowerCase();
-
-      return sortedMeasurements.filter(
-        (measurement) => {
-          const matchesType =
-            selectedType === "All" ||
-            measurement.type === selectedType;
-
-          const searchable = [
-            measurement.type,
-            measurement.date,
-            measurement.notes,
-            measurement.bust,
-            measurement.waist,
-            measurement.hip,
-          ]
-            .join(" ")
-            .toLowerCase();
-
-          const matchesSearch =
-            !query ||
-            searchable.includes(query);
-
-          return (
-            matchesType &&
-            matchesSearch
-          );
-        }
-      );
-    }, [
-      sortedMeasurements,
-      selectedType,
-      search,
-    ]);
-
-  function openAddMeasurement() {
+  const openAddForm = () => {
     setEditingMeasurement(null);
+    setForm({ ...emptyForm });
+    setFabricPhotos([]);
+    setRoughNotes("");
+    setDate(dbToDisplayDate(dbDate()));
+    setShowForm(true);
+  };
 
-    setForm({
-      ...EMPTY_FORM,
-      date: createDefaultDate(),
-    });
-
-    setModalVisible(true);
-  }
-
-  function openEditMeasurement(
+  const openEditForm = (
     measurement: Measurement
-  ) {
+  ) => {
     setEditingMeasurement(measurement);
+    setFabricPhotos([]);
+    setRoughNotes("");
 
     setForm({
-      date: displayDate(measurement.date),
       type: measurement.type || "Blouse",
       bust: measurement.bust || "",
       waist: measurement.waist || "",
@@ -384,35 +247,84 @@ export default function MeasurementsScreen({
         measurement.frontNeck || "",
       backNeck:
         measurement.backNeck || "",
-      armhole:
-        measurement.armhole || "",
+      armhole: measurement.armhole || "",
       pantLength:
         measurement.pantLength || "",
-      notes:
-        measurement.notes || "",
+      notes: measurement.notes || "",
     });
 
-    setModalVisible(true);
-  }
+    setDate(
+      dbToDisplayDate(
+        measurement.date
+      )
+    );
 
-  function openDetails(
-    measurement: Measurement
-  ) {
-    setSelectedMeasurement(measurement);
-    setDetailsVisible(true);
-  }
+    setShowForm(true);
+  };
 
-  function updateField(
-    field: keyof Omit<Measurement, "id">,
+  const closeForm = () => {
+    setShowForm(false);
+    setEditingMeasurement(null);
+    setFabricPhotos([]);
+    setRoughNotes("");
+  };
+
+  const updateField = (
+    field: keyof typeof emptyForm,
     value: string
-  ) {
+  ) => {
     setForm((previous) => ({
       ...previous,
       [field]: value,
     }));
-  }
+  };
 
-  async function saveMeasurement() {
+  const pickFabricPhotos = async () => {
+    try {
+      if (fabricPhotos.length >= 5) {
+        Alert.alert("Photo limit", "You can add up to 5 fabric photos.");
+        return;
+      }
+
+      const permission =
+        await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+      if (!permission.granted) {
+        Alert.alert(
+          "Permission required",
+          "Please allow gallery access to select fabric photos."
+        );
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsMultipleSelection: true,
+        selectionLimit: 5 - fabricPhotos.length,
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets.length > 0) {
+        const selectedUris = result.assets
+          .map((asset) => asset.uri)
+          .filter((uri) => !fabricPhotos.includes(uri));
+
+        setFabricPhotos((previous) =>
+          [...previous, ...selectedUris].slice(0, 5)
+        );
+      }
+    } catch (error) {
+      console.error("FABRIC PHOTO PICKER ERROR:", error);
+      Alert.alert("Unable to open gallery", "Please try again.");
+    }
+  };
+
+  const removeFabricPhoto = (uri: string) => {
+    setFabricPhotos((previous) =>
+      previous.filter((photo) => photo !== uri)
+    );
+  };
+  const saveMeasurement = async () => {
     if (!form.type.trim()) {
       Alert.alert(
         "Measurement Type",
@@ -421,152 +333,210 @@ export default function MeasurementsScreen({
       return;
     }
 
-    if (!form.date.trim()) {
-      Alert.alert(
-        "Date Required",
-        "Please enter the measurement date."
-      );
-      return;
-    }
-
-    setSaving(true);
+    const measurementData: Omit<
+      Measurement,
+      "id"
+    > = {
+      date: displayToDbDate(date),
+      type: form.type,
+      bust: form.bust.trim(),
+      waist: form.waist.trim(),
+      hip: form.hip.trim(),
+      shoulder: form.shoulder.trim(),
+      sleeveLength:
+        form.sleeveLength.trim(),
+      blouseLength:
+        form.blouseLength.trim(),
+      frontNeck:
+        form.frontNeck.trim(),
+      backNeck:
+        form.backNeck.trim(),
+      armhole: form.armhole.trim(),
+      pantLength:
+        form.pantLength.trim(),
+      notes: [form.notes.trim(), roughNotes.trim()].filter(Boolean).join("\n\n"),
+    };
 
     try {
-      const payload: Omit<
-        Measurement,
-        "id"
-      > = {
-        ...form,
-        date: databaseDate(form.date),
-        type: form.type.trim(),
-      };
-
       if (editingMeasurement) {
         await onUpdateMeasurement(
           editingMeasurement.id,
-          payload
-        );
-
-        Alert.alert(
-          "Measurement Updated",
-          "Measurement updated successfully."
+          measurementData
         );
       } else {
-        await onAddMeasurement(payload);
-
-        Alert.alert(
-          "Measurement Saved",
-          "Measurement saved successfully."
+        await onAddMeasurement(
+          measurementData
         );
       }
 
-      setModalVisible(false);
-      setEditingMeasurement(null);
-      setForm(EMPTY_FORM);
+      closeForm();
     } catch (error) {
-      Alert.alert(
-        "Unable to Save",
-        error instanceof Error
-          ? error.message
-          : "Something went wrong while saving."
+      console.error(
+        "SAVE MEASUREMENT ERROR:",
+        error
       );
-    } finally {
-      setSaving(false);
+
+      Alert.alert(
+        "Save Failed",
+        "Unable to save measurement."
+      );
     }
-  }
+  };
+
+  const confirmDeleteMeasurement = (
+    measurement: Measurement
+  ) => {
+    Alert.alert(
+      "Delete Measurement",
+      `Are you sure you want to delete this ${measurement.type} measurement?`,
+      [
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await onDeleteMeasurement(
+                measurement.id
+              );
+
+              setShowDetails(false);
+              setSelectedMeasurement(null);
+            } catch (error) {
+              console.error(
+                "DELETE MEASUREMENT ERROR:",
+                error
+              );
+
+              Alert.alert(
+                "Delete Failed",
+                "Unable to delete measurement."
+              );
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const field = (
+    label: string,
+    key: keyof typeof emptyForm,
+    placeholder = "Enter value"
+  ) => {
+    return (
+      <View style={styles.fieldContainer}>
+        <Text style={styles.fieldLabel}>
+          {label}
+        </Text>
+
+        <TextInput
+          value={form[key]}
+          onChangeText={(value) =>
+            updateField(key, value)
+          }
+          placeholder={placeholder}
+          placeholderTextColor="#999"
+          style={[styles.input, styles.measurementInput]}
+          keyboardType={
+            key === "notes"
+              ? "default"
+              : "decimal-pad"
+          }
+        />
+      </View>
+    );
+  };
 
   return (
-    <SafeAreaView style={styles.safe}>
+    <View style={styles.container}>
       <ScrollView
         contentContainerStyle={
-          styles.container
+          styles.scrollContent
         }
-        keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        {/* HEADER */}
-
         <View style={styles.header}>
-          <View style={{ flex: 1 }}>
-            <Text style={styles.eyebrow}>
+          <View style={styles.headerText}>
+            <Text style={styles.brand}>
               FEMME FATALE BOUTIQUE
             </Text>
 
-            <Text style={styles.heading}>
+            <Text style={styles.title}>
               Measurements
             </Text>
 
-            <Text style={styles.subheading}>
-              {customer.name}'s saved measurements
+            <Text style={styles.subtitle}>
+              {customer.name} Ã¢â‚¬Â¢ {customer.phone}
             </Text>
           </View>
 
           <TouchableOpacity
             style={styles.addButton}
-            onPress={openAddMeasurement}
+            onPress={openAddForm}
+            activeOpacity={0.85}
           >
-            <Text style={styles.addPlus}>
-              ＋
-            </Text>
-
             <Text style={styles.addButtonText}>
-              Add
+              + Add
             </Text>
           </TouchableOpacity>
         </View>
 
-        {/* CUSTOMER SUMMARY */}
-
         <View style={styles.customerCard}>
-          <View style={styles.avatar}>
-            <Text style={styles.avatarText}>
-              {(customer.name || "?")
-                .charAt(0)
+          <View style={styles.customerAvatar}>
+            <Text style={styles.customerAvatarText}>
+              {customer.name
+                .split(" ")
+                .map((item) => item[0])
+                .join("")
+                .slice(0, 2)
                 .toUpperCase()}
             </Text>
           </View>
 
-          <View style={{ flex: 1 }}>
+          <View style={styles.customerInfo}>
             <Text style={styles.customerName}>
               {customer.name}
             </Text>
 
-            {customer.phone ? (
-              <Text style={styles.customerPhone}>
-                {customer.phone}
-              </Text>
-            ) : null}
+            <Text style={styles.customerPhone}>
+              {customer.phone}
+            </Text>
           </View>
 
-          <View style={styles.countBox}>
-            <Text style={styles.countNumber}>
+          <View style={styles.measurementCount}>
+            <Text
+              style={
+                styles.measurementCountNumber
+              }
+            >
               {measurements.length}
             </Text>
 
-            <Text style={styles.countLabel}>
+            <Text
+              style={
+                styles.measurementCountLabel
+              }
+            >
               Saved
             </Text>
           </View>
         </View>
 
-        {/* LATEST MEASUREMENT */}
-
         {latestMeasurement && (
-          <View style={styles.latestPanel}>
+          <View style={styles.latestCard}>
             <View style={styles.latestHeader}>
               <View>
-                <Text
-                  style={styles.latestKicker}
-                >
-                  LATEST MEASUREMENT
-                </Text>
-
                 <Text style={styles.latestTitle}>
-                  {latestMeasurement.type}
+                  Latest Measurement
                 </Text>
 
                 <Text style={styles.latestDate}>
-                  {displayDate(
+                  {latestMeasurement.type} {"\u00B7"}{" "}
+                  {formatDate(
                     latestMeasurement.date
                   )}
                 </Text>
@@ -574,872 +544,901 @@ export default function MeasurementsScreen({
 
               <TouchableOpacity
                 onPress={() =>
-                  openDetails(
+                  openEditForm(
                     latestMeasurement
                   )
                 }
               >
-                <Text style={styles.latestView}>
-                  View
+                <Text
+                  style={styles.latestEdit}
+                >
+                  Edit
                 </Text>
               </TouchableOpacity>
             </View>
 
-            <View style={styles.latestStats}>
-              <View style={styles.latestStat}>
-                <Text style={styles.statLabel}>
-                  Bust
-                </Text>
+            <View style={styles.measurementGrid}>
+              <MeasurementValue
+                label="Bust"
+                value={latestMeasurement.bust}
+              />
 
-                <Text style={styles.statValue}>
-                  {latestMeasurement.bust
-                    ? `${latestMeasurement.bust}"`
-                    : "—"}
-                </Text>
-              </View>
+              <MeasurementValue
+                label="Waist"
+                value={latestMeasurement.waist}
+              />
 
-              <View style={styles.latestStat}>
-                <Text style={styles.statLabel}>
-                  Waist
-                </Text>
+              <MeasurementValue
+                label="Hip"
+                value={latestMeasurement.hip}
+              />
 
-                <Text style={styles.statValue}>
-                  {latestMeasurement.waist
-                    ? `${latestMeasurement.waist}"`
-                    : "—"}
-                </Text>
-              </View>
-
-              <View style={styles.latestStat}>
-                <Text style={styles.statLabel}>
-                  Hip
-                </Text>
-
-                <Text style={styles.statValue}>
-                  {latestMeasurement.hip
-                    ? `${latestMeasurement.hip}"`
-                    : "—"}
-                </Text>
-              </View>
-
-              <View style={styles.latestStat}>
-                <Text style={styles.statLabel}>
-                  Shoulder
-                </Text>
-
-                <Text style={styles.statValue}>
-                  {latestMeasurement.shoulder
-                    ? `${latestMeasurement.shoulder}"`
-                    : "—"}
-                </Text>
-              </View>
+              <MeasurementValue
+                label="Shoulder"
+                value={
+                  latestMeasurement.shoulder
+                }
+              />
             </View>
           </View>
         )}
 
-        {/* SEARCH */}
-
         <View style={styles.searchBox}>
-          <Text style={styles.searchIcon}>
-            ⌕
-          </Text>
+          <Text style={styles.searchIcon}>{"\u2315"}</Text>
 
           <TextInput
             value={search}
             onChangeText={setSearch}
             placeholder="Search measurements..."
-            placeholderTextColor="#A99BA3"
+            placeholderTextColor="#999"
             style={styles.searchInput}
           />
 
-          {search ? (
+          {search.length > 0 && (
             <TouchableOpacity
               onPress={() => setSearch("")}
             >
-              <Text style={styles.clearText}>
-                ×
-              </Text>
+              <Text style={styles.clearText}>{"\u00D7"}</Text>
             </TouchableOpacity>
-          ) : null}
+          )}
         </View>
-
-        {/* FILTERS */}
 
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
           contentContainerStyle={
-            styles.filterContainer
+            styles.filterContent
           }
         >
-          {[
-            "All",
-            ...MEASUREMENT_TYPES,
-          ].map((type) => {
-            const active =
-              selectedType === type;
+          <TouchableOpacity
+            style={[
+              styles.filterButton,
+              typeFilter === "All" &&
+                styles.filterButtonActive,
+            ]}
+            onPress={() =>
+              setTypeFilter("All")
+            }
+          >
+            <Text
+              style={[
+                styles.filterText,
+                typeFilter === "All" &&
+                  styles.filterTextActive,
+              ]}
+            >
+              All
+            </Text>
+          </TouchableOpacity>
 
-            return (
-              <TouchableOpacity
-                key={type}
-                onPress={() =>
-                  setSelectedType(type)
-                }
+          {measurementTypes.map((type) => (
+            <TouchableOpacity
+              key={type}
+              style={[
+                styles.filterButton,
+                typeFilter === type &&
+                  styles.filterButtonActive,
+              ]}
+              onPress={() =>
+                setTypeFilter(type)
+              }
+            >
+              <Text
                 style={[
-                  styles.filter,
-                  active &&
-                    styles.filterActive,
+                  styles.filterText,
+                  typeFilter === type &&
+                    styles.filterTextActive,
                 ]}
               >
-                <Text
-                  style={[
-                    styles.filterText,
-                    active &&
-                      styles.filterTextActive,
-                  ]}
-                >
-                  {type}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
+                {type}
+              </Text>
+            </TouchableOpacity>
+          ))}
         </ScrollView>
 
-        {/* HISTORY */}
-
         <View style={styles.historyHeader}>
-          <View>
-            <Text style={styles.sectionTitle}>
-              Measurement History
-            </Text>
+          <Text style={styles.historyTitle}>
+            Measurement History
+          </Text>
 
-            <Text
-              style={styles.sectionSubtitle}
-            >
-              {filteredMeasurements.length}{" "}
-              record
-              {filteredMeasurements.length ===
-              1
-                ? ""
-                : "s"}
-            </Text>
-          </View>
-
-          <Text style={styles.unitText}>
-            All values in inches
+          <Text style={styles.historyCount}>
+            {filteredMeasurements.length}
           </Text>
         </View>
 
-        {filteredMeasurements.length ===
-        0 ? (
-          <View style={styles.emptyState}>
-            <View style={styles.emptyIcon}>
-              <Text
-                style={styles.emptyIconText}
-              >
-                M
-              </Text>
-            </View>
+        {filteredMeasurements.length === 0 ? (
+          <View style={styles.emptyCard}>
+            <Text style={styles.emptyIcon}>{"\u{1F4CF}"}</Text>
 
             <Text style={styles.emptyTitle}>
               No measurements found
             </Text>
 
-            <Text style={styles.emptyText}>
-              {measurements.length === 0
-                ? "Add the customer's first measurement profile."
-                : "Try another search or measurement type."}
+            <Text style={styles.emptySubtitle}>
+              Add a measurement profile for{" "}
+              {customer.name}.
             </Text>
 
-            {measurements.length === 0 && (
-              <TouchableOpacity
-                style={styles.emptyButton}
-                onPress={
-                  openAddMeasurement
-                }
+            <TouchableOpacity
+              style={styles.emptyButton}
+              onPress={openAddForm}
+            >
+              <Text
+                style={styles.emptyButtonText}
               >
-                <Text
-                  style={
-                    styles.emptyButtonText
-                  }
-                >
-                  + Add Measurement
-                </Text>
-              </TouchableOpacity>
-            )}
+                + Add Measurement
+              </Text>
+            </TouchableOpacity>
           </View>
         ) : (
           filteredMeasurements.map(
             (measurement) => (
-              <MeasurementCard
+              <TouchableOpacity
                 key={measurement.id}
-                measurement={
-                  measurement
-                }
-                latest={
-                  measurement.id ===
-                  latestMeasurement?.id
-                }
-                onEdit={() =>
-                  openEditMeasurement(
+                style={styles.historyCard}
+                activeOpacity={0.9}
+                onPress={() => {
+                  setSelectedMeasurement(
                     measurement
-                  )
-                }
-                onView={() =>
-                  openDetails(
-                    measurement
-                  )
-                }
-              />
+                  );
+                  setShowDetails(true);
+                }}
+              >
+                <View
+                  style={styles.historyTop}
+                >
+                  <View
+                    style={styles.historyMain}
+                  >
+                    <Text
+                      style={
+                        styles.historyType
+                      }
+                    >
+                      {measurement.type}
+                    </Text>
+
+                    <Text
+                      style={
+                        styles.historyDate
+                      }
+                    >
+                      {formatDate(
+                        measurement.date
+                      )}
+                    </Text>
+                  </View>
+
+                  <TouchableOpacity
+                    style={
+                      styles.smallEditButton
+                    }
+                    onPress={() =>
+                      openEditForm(
+                        measurement
+                      )
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.smallEditText
+                      }
+                    >
+                      Edit
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View
+                  style={
+                    styles.historyMeasurements
+                  }
+                >
+                  <SmallMeasurement
+                    label="Bust"
+                    value={
+                      measurement.bust
+                    }
+                  />
+
+                  <SmallMeasurement
+                    label="Waist"
+                    value={
+                      measurement.waist
+                    }
+                  />
+
+                  <SmallMeasurement
+                    label="Hip"
+                    value={
+                      measurement.hip
+                    }
+                  />
+
+                  <SmallMeasurement
+                    label="Shoulder"
+                    value={
+                      measurement.shoulder
+                    }
+                  />
+                </View>
+
+                {measurement.notes ? (
+                  <Text
+                    style={styles.notesPreview}
+                    numberOfLines={1}
+                  >
+                    Note:{" "}
+                    {measurement.notes}
+                  </Text>
+                ) : null}
+              </TouchableOpacity>
             )
           )
         )}
-
-        <View style={styles.bottomSpace} />
       </ScrollView>
 
-      {/* ADD / EDIT MODAL */}
-
       <Modal
-        visible={modalVisible}
-        animationType="slide"
+        visible={showForm}
         transparent
-        onRequestClose={() => {
-          if (!saving) {
-            setModalVisible(false);
-          }
-        }}
-      >
-        <KeyboardAvoidingView
-          style={styles.modalRoot}
-          behavior={
-            Platform.OS === "ios"
-              ? "padding"
-              : undefined
-          }
-        >
-          <View style={styles.modalBackdrop}>
-            <View style={styles.modalCard}>
-              <View
-                style={styles.modalHeader}
-              >
-                <View style={{ flex: 1 }}>
-                  <Text
-                    style={styles.modalKicker}
-                  >
-                    {editingMeasurement
-                      ? "UPDATE PROFILE"
-                      : "NEW PROFILE"}
-                  </Text>
-
-                  <Text
-                    style={styles.modalTitle}
-                  >
-                    {editingMeasurement
-                      ? "Edit Measurement"
-                      : "Add Measurement"}
-                  </Text>
-                </View>
-
-                <TouchableOpacity
-                  disabled={saving}
-                  style={
-                    styles.closeButton
-                  }
-                  onPress={() =>
-                    setModalVisible(false)
-                  }
-                >
-                  <Text
-                    style={styles.closeText}
-                  >
-                    ×
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              <ScrollView
-                keyboardShouldPersistTaps="handled"
-                showsVerticalScrollIndicator={
-                  false
-                }
-              >
-                {/* TYPE */}
-
-                <Text
-                  style={
-                    styles.formSectionTitle
-                  }
-                >
-                  Measurement Profile
-                </Text>
-
-                <Text
-                  style={styles.fieldLabel}
-                >
-                  Type
-                </Text>
-
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={
-                    false
-                  }
-                  contentContainerStyle={
-                    styles.typeContainer
-                  }
-                >
-                  {MEASUREMENT_TYPES.map(
-                    (type) => {
-                      const active =
-                        form.type === type;
-
-                      return (
-                        <TouchableOpacity
-                          key={type}
-                          onPress={() =>
-                            updateField(
-                              "type",
-                              type
-                            )
-                          }
-                          style={[
-                            styles.typePill,
-                            active &&
-                              styles.typePillActive,
-                          ]}
-                        >
-                          <Text
-                            style={[
-                              styles.typePillText,
-                              active &&
-                                styles.typePillTextActive,
-                            ]}
-                          >
-                            {type}
-                          </Text>
-                        </TouchableOpacity>
-                      );
-                    }
-                  )}
-                </ScrollView>
-
-                {/* DATE */}
-
-                <Text
-                  style={[
-                    styles.fieldLabel,
-                    {
-                      marginTop: 15,
-                    },
-                  ]}
-                >
-                  Date
-                </Text>
-
-                <TextInput
-                  value={form.date}
-                  onChangeText={(value) =>
-                    updateField(
-                      "date",
-                      value
-                    )
-                  }
-                  placeholder="DD/MM/YYYY"
-                  placeholderTextColor="#B6A9B0"
-                  keyboardType="numbers-and-punctuation"
-                  style={styles.fullInput}
-                />
-
-                {/* BODY MEASUREMENTS */}
-
-                <Text
-                  style={
-                    styles.formSectionTitle
-                  }
-                >
-                  Body Measurements
-                </Text>
-
-                <View style={styles.grid}>
-                  <MeasurementField
-                    label="Bust"
-                    value={form.bust}
-                    onChangeText={(value) =>
-                      updateField(
-                        "bust",
-                        value
-                      )
-                    }
-                  />
-
-                  <MeasurementField
-                    label="Waist"
-                    value={form.waist}
-                    onChangeText={(value) =>
-                      updateField(
-                        "waist",
-                        value
-                      )
-                    }
-                  />
-
-                  <MeasurementField
-                    label="Hip"
-                    value={form.hip}
-                    onChangeText={(value) =>
-                      updateField(
-                        "hip",
-                        value
-                      )
-                    }
-                  />
-
-                  <MeasurementField
-                    label="Shoulder"
-                    value={form.shoulder}
-                    onChangeText={(value) =>
-                      updateField(
-                        "shoulder",
-                        value
-                      )
-                    }
-                  />
-
-                  <MeasurementField
-                    label="Sleeve Length"
-                    value={
-                      form.sleeveLength
-                    }
-                    onChangeText={(value) =>
-                      updateField(
-                        "sleeveLength",
-                        value
-                      )
-                    }
-                  />
-
-                  <MeasurementField
-                    label="Blouse Length"
-                    value={
-                      form.blouseLength
-                    }
-                    onChangeText={(value) =>
-                      updateField(
-                        "blouseLength",
-                        value
-                      )
-                    }
-                  />
-
-                  <MeasurementField
-                    label="Front Neck"
-                    value={
-                      form.frontNeck
-                    }
-                    onChangeText={(value) =>
-                      updateField(
-                        "frontNeck",
-                        value
-                      )
-                    }
-                  />
-
-                  <MeasurementField
-                    label="Back Neck"
-                    value={
-                      form.backNeck
-                    }
-                    onChangeText={(value) =>
-                      updateField(
-                        "backNeck",
-                        value
-                      )
-                    }
-                  />
-
-                  <MeasurementField
-                    label="Armhole"
-                    value={form.armhole}
-                    onChangeText={(value) =>
-                      updateField(
-                        "armhole",
-                        value
-                      )
-                    }
-                  />
-
-                  <MeasurementField
-                    label="Pant Length"
-                    value={
-                      form.pantLength
-                    }
-                    onChangeText={(value) =>
-                      updateField(
-                        "pantLength",
-                        value
-                      )
-                    }
-                  />
-                </View>
-
-                {/* NOTES */}
-
-                <Text
-                  style={styles.fieldLabel}
-                >
-                  Notes
-                </Text>
-
-                <TextInput
-                  value={form.notes}
-                  onChangeText={(value) =>
-                    updateField(
-                      "notes",
-                      value
-                    )
-                  }
-                  placeholder="Fitting notes, alterations, special instructions..."
-                  placeholderTextColor="#B6A9B0"
-                  multiline
-                  textAlignVertical="top"
-                  style={styles.notesInput}
-                />
-
-                {/* SAVE */}
-
-                <TouchableOpacity
-                  disabled={saving}
-                  style={[
-                    styles.saveButton,
-                    saving &&
-                      styles.disabledButton,
-                  ]}
-                  onPress={
-                    saveMeasurement
-                  }
-                >
-                  <Text
-                    style={
-                      styles.saveButtonText
-                    }
-                  >
-                    {saving
-                      ? "Saving..."
-                      : editingMeasurement
-                      ? "Update Measurement"
-                      : "Save Measurement"}
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  disabled={saving}
-                  style={
-                    styles.cancelButton
-                  }
-                  onPress={() =>
-                    setModalVisible(false)
-                  }
-                >
-                  <Text
-                    style={
-                      styles.cancelButtonText
-                    }
-                  >
-                    Cancel
-                  </Text>
-                </TouchableOpacity>
-
-                <View
-                  style={{
-                    height: 25,
-                  }}
-                />
-              </ScrollView>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      {/* DETAILS MODAL */}
-
-      <Modal
-        visible={detailsVisible}
         animationType="slide"
-        transparent
-        onRequestClose={() =>
-          setDetailsVisible(false)
-        }
+        onRequestClose={closeForm}
       >
-        <View style={styles.modalBackdrop}>
-          <View style={styles.detailCard}>
-            <View
-              style={styles.modalHeader}
-            >
+        <View style={styles.overlay}>
+          <View style={styles.formModal}>
+            <View style={styles.modalHeader}>
               <View style={{ flex: 1 }}>
-                <Text
-                  style={styles.modalKicker}
-                >
-                  SAVED MEASUREMENT
-                </Text>
-
                 <Text
                   style={styles.modalTitle}
                 >
-                  {selectedMeasurement?.type ||
-                    "Measurement"}
+                  {editingMeasurement
+                    ? "Edit Measurement"
+                    : "New Measurement"}
                 </Text>
 
                 <Text
-                  style={styles.detailDate}
+                  style={
+                    styles.modalSubtitle
+                  }
                 >
-                  {displayDate(
-                    selectedMeasurement?.date ||
-                      ""
-                  )}
+                  {customer.name}
                 </Text>
               </View>
 
               <TouchableOpacity
                 style={styles.closeButton}
-                onPress={() =>
-                  setDetailsVisible(false)
-                }
+                onPress={closeForm}
               >
-                <Text
-                  style={styles.closeText}
-                >
-                  ×
-                </Text>
+                <Text style={styles.closeText}>{"\u00D7"}</Text>
               </TouchableOpacity>
             </View>
 
-            {selectedMeasurement && (
+            <ScrollView
+              showsVerticalScrollIndicator={
+                false
+              }
+              keyboardShouldPersistTaps="handled"
+            >
+              <Text style={styles.formSectionTitle}>
+                Measurement Type
+              </Text>
+
               <ScrollView
-                showsVerticalScrollIndicator={
+                horizontal
+                showsHorizontalScrollIndicator={
                   false
                 }
+                contentContainerStyle={
+                  styles.typeRow
+                }
               >
-                <View
-                  style={styles.detailGrid}
-                >
-                  {Object.entries(
-                    LABELS
-                  ).map(([key, label]) => {
-                    const value =
-                      selectedMeasurement[
-                        key as keyof Measurement
-                      ];
-
-                    return (
-                      <View
-                        key={key}
-                        style={
-                          styles.detailItem
-                        }
+                {measurementTypes.map(
+                  (type) => (
+                    <TouchableOpacity
+                      key={type}
+                      style={[
+                        styles.typeChip,
+                        form.type === type &&
+                          styles.typeChipActive,
+                      ]}
+                      onPress={() =>
+                        updateField(
+                          "type",
+                          type
+                        )
+                      }
+                    >
+                      <Text
+                        style={[
+                          styles.typeChipText,
+                          form.type ===
+                            type &&
+                            styles.typeChipTextActive,
+                        ]}
                       >
-                        <Text
-                          style={
-                            styles.detailLabel
-                          }
-                        >
-                          {label}
-                        </Text>
+                        {type}
+                      </Text>
+                    </TouchableOpacity>
+                  )
+                )}
+              </ScrollView>
 
-                        <Text
-                          style={
-                            styles.detailValue
-                          }
-                        >
-                          {value
-                            ? `${value}"`
-                            : "—"}
-                        </Text>
-                      </View>
-                    );
-                  })}
+              <Text style={styles.formSectionTitle}>
+                Date
+              </Text>
+
+              <TextInput
+                value={date}
+                onChangeText={setDate}
+                placeholder="DD/MM/YYYY"
+                placeholderTextColor="#999"
+                style={styles.input}
+                keyboardType="numbers-and-punctuation"
+              />
+
+              <Text style={styles.formSectionTitle}>
+                Body Measurements
+              </Text>
+
+              <Text style={styles.measurementHelper}>
+                Enter measurements in inches
+              </Text>
+
+              <View style={styles.measurementGrid}>
+                <View style={styles.measurementCard}>
+                  {field("Length", "blouseLength", 'e.g. 15"')}
+                </View>
+                <View style={styles.measurementCard}>
+                  {field("Shoulder", "shoulder", 'e.g. 14"')}
+                </View>
+                <View style={styles.measurementCard}>
+                  {field("Hands / Sleeve", "sleeveLength", 'e.g. 12"')}
+                </View>
+                <View style={styles.measurementCard}>
+                  {field("High Chest", "bust", 'e.g. 34"')}
+                </View>
+                <View style={styles.measurementCard}>
+                  {field("Low Chest", "waist", 'e.g. 30"')}
+                </View>
+                <View style={styles.measurementCard}>
+                  {field("Front", "frontNeck", 'e.g. 6"')}
+                </View>
+                <View style={styles.measurementCard}>
+                  {field("Back", "backNeck", 'e.g. 7"')}
+                </View>
+                <View style={styles.measurementCard}>
+                  {field("Armhole", "armhole", 'e.g. 15"')}
+                </View>
+                <View style={styles.measurementCard}>
+                  {field("Pant Length", "pantLength", 'e.g. 40"')}
+                </View>
+                <View style={styles.measurementCard}>
+                  {field("Hip", "hip", 'e.g. 38"')}
+                </View>
+              </View>
+
+              <Text style={styles.formSectionTitle}>
+                Additional Measurement
+              </Text><Text style={styles.formSectionTitle}>
+                Additional Measurement
+              </Text>
+              {field("Hip", "hip", 'e.g. 38"')}
+
+
+
+              <Text style={styles.formSectionTitle}>
+                Rough Notes
+              </Text>
+
+              <TextInput
+                value={roughNotes}
+                onChangeText={setRoughNotes}
+                placeholder="Special fitting instructions, design preferences, alterations..."
+                placeholderTextColor="#947783"
+                multiline
+                textAlignVertical="top"
+                style={[
+                  styles.input,
+                  styles.roughNotesInput,
+                ]}
+              />
+
+              <Text style={styles.formSectionTitle}>
+                Fabric Photos
+              </Text>
+
+              <TouchableOpacity
+                style={styles.photoPickerButton}
+                onPress={pickFabricPhotos}
+                activeOpacity={0.85}
+              >
+                <Text style={styles.photoPickerIcon}>+</Text>
+                <Text style={styles.photoPickerText}>
+                  Add Fabric Photos
+                </Text>
+              </TouchableOpacity>
+
+              <Text style={styles.photoHint}>
+                Add up to 5 fabric or design reference photos.
+              </Text>
+
+              {fabricPhotos.length > 0 && (
+                <View style={styles.photoGrid}>
+                  {fabricPhotos.map((photo, index) => (
+                    <View
+                      key={`${photo}-${index}`}
+                      style={styles.photoCard}
+                    >
+                      <Image
+                        source={{ uri: photo }}
+                        style={styles.fabricPhoto}
+                      />
+
+                      <TouchableOpacity
+                        style={styles.removePhotoButton}
+                        onPress={() => removeFabricPhoto(photo)}
+                      >
+                        <Text style={styles.removePhotoText}>{"\u00D7"}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                </View>
+              )}
+              <TouchableOpacity
+                style={styles.saveButton}
+                onPress={saveMeasurement}
+                activeOpacity={0.85}
+              >
+                <Text
+                  style={
+                    styles.saveButtonText
+                  }
+                >
+                  {editingMeasurement
+                    ? "Update Measurement"
+                    : "Save Measurement"}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.cancelButton}
+                onPress={closeForm}
+              >
+                <Text
+                  style={
+                    styles.cancelButtonText
+                  }
+                >
+                  Cancel
+                </Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={showDetails}
+        transparent
+        animationType="fade"
+        onRequestClose={() =>
+          setShowDetails(false)
+        }
+      >
+        <View style={styles.overlay}>
+          <View style={styles.detailsModal}>
+            {selectedMeasurement && (
+              <>
+                <View
+                  style={styles.modalHeader}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text
+                      style={styles.modalTitle}
+                    >
+                      {
+                        selectedMeasurement.type
+                      }
+                    </Text>
+
+                    <Text
+                      style={
+                        styles.modalSubtitle
+                      }
+                    >
+                      {customer.name} Ã¢â‚¬Â¢{" "}
+                      {formatDate(
+                        selectedMeasurement.date
+                      )}
+                    </Text>
+                  </View>
+
+                  <TouchableOpacity
+                    style={styles.closeButton}
+                    onPress={() =>
+                      setShowDetails(false)
+                    }
+                  >
+                    <Text style={styles.closeText}>{"\u00D7"}</Text>
+                  </TouchableOpacity>
                 </View>
 
-                {selectedMeasurement.notes ? (
+                <ScrollView
+                  showsVerticalScrollIndicator={
+                    false
+                  }
+                >
+                  <DetailGroup
+                    title="Body Measurements"
+                    values={[
+                      [
+                        "Bust",
+                        selectedMeasurement.bust,
+                      ],
+                      [
+                        "Waist",
+                        selectedMeasurement.waist,
+                      ],
+                      [
+                        "Hip",
+                        selectedMeasurement.hip,
+                      ],
+                      [
+                        "Shoulder",
+                        selectedMeasurement.shoulder,
+                      ],
+                      [
+                        "Sleeve Length",
+                        selectedMeasurement.sleeveLength,
+                      ],
+                      [
+                        "Blouse Length",
+                        selectedMeasurement.blouseLength,
+                      ],
+                      [
+                        "Front Neck",
+                        selectedMeasurement.frontNeck,
+                      ],
+                      [
+                        "Back Neck",
+                        selectedMeasurement.backNeck,
+                      ],
+                      [
+                        "Armhole",
+                        selectedMeasurement.armhole,
+                      ],
+                      [
+                        "Pant Length",
+                        selectedMeasurement.pantLength,
+                      ],
+                    ]}
+                  />
+
                   <View
-                    style={styles.notesBox}
+                    style={styles.detailsSection}
                   >
                     <Text
                       style={
-                        styles.notesBoxTitle
+                        styles.detailsSectionTitle
                       }
                     >
                       Notes
                     </Text>
 
                     <Text
-                      style={
-                        styles.notesBoxText
-                      }
+                      style={styles.detailsNotes}
                     >
-                      {
-                        selectedMeasurement.notes
-                      }
+                      {selectedMeasurement.notes ||
+                        "No notes added."}
                     </Text>
                   </View>
-                ) : null}
 
-                <TouchableOpacity
-                  style={styles.saveButton}
-                  onPress={() => {
-                    setDetailsVisible(
-                      false
-                    );
-
-                    openEditMeasurement(
-                      selectedMeasurement
-                    );
-                  }}
-                >
-                  <Text
+                  <View
                     style={
-                      styles.saveButtonText
+                      styles.detailsActions
                     }
                   >
-                    Edit Measurement
-                  </Text>
-                </TouchableOpacity>
+                    <TouchableOpacity
+                      style={
+                        styles.detailsEditButton
+                      }
+                      onPress={() => {
+                        setShowDetails(false);
+                        openEditForm(
+                          selectedMeasurement
+                        );
+                      }}
+                    >
+                      <Text
+                        style={
+                          styles.detailsEditText
+                        }
+                      >
+                        Edit Measurement
+                      </Text>
+                    </TouchableOpacity>
 
-                <View
-                  style={{
-                    height: 25,
-                  }}
-                />
-              </ScrollView>
+                    <TouchableOpacity
+                      style={
+                        styles.detailsDeleteButton
+                      }
+                      onPress={() =>
+                        confirmDeleteMeasurement(
+                          selectedMeasurement
+                        )
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.detailsDeleteText
+                        }
+                      >
+                        Delete Measurement
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={
+                        styles.detailsCloseButton
+                      }
+                      onPress={() =>
+                        setShowDetails(false)
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.detailsCloseButtonText
+                        }
+                      >
+                        Close
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </ScrollView>
+              </>
             )}
           </View>
         </View>
       </Modal>
-    </SafeAreaView>
+    </View>
+  );
+}
+
+function MeasurementValue({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <View style={styles.measurementValue}>
+      <Text
+        style={
+          styles.measurementValueLabel
+        }
+      >
+        {label}
+      </Text>
+
+      <Text
+        style={
+          styles.measurementValueText
+        }
+      >
+        {value || "-"}
+      </Text>
+    </View>
+  );
+}
+
+function SmallMeasurement({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <View style={styles.smallMeasurement}>
+      <Text
+        style={
+          styles.smallMeasurementLabel
+        }
+      >
+        {label}
+      </Text>
+
+      <Text
+        style={
+          styles.smallMeasurementValue
+        }
+      >
+        {value || "-"}
+      </Text>
+    </View>
+  );
+}
+
+function DetailGroup({
+  title,
+  values,
+}: {
+  title: string;
+  values: [string, string][];
+}) {
+  return (
+    <View style={styles.detailsSection}>
+      <Text
+        style={styles.detailsSectionTitle}
+      >
+        {title}
+      </Text>
+
+      <View style={styles.detailsGrid}>
+        {values.map(([label, value]) => (
+          <View
+            key={label}
+            style={styles.detailItem}
+          >
+            <Text
+              style={styles.detailLabel}
+            >
+              {label}
+            </Text>
+
+            <Text
+              style={styles.detailValue}
+            >
+              {value || "-"}
+            </Text>
+          </View>
+        ))}
+      </View>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: {
+  container: {
     flex: 1,
-    backgroundColor: "#FFF9F2",
+    backgroundColor: colors.Cream,
   },
 
-  container: {
+  scrollContent: {
     padding: 18,
-    paddingBottom: 40,
+    paddingBottom: 45,
   },
 
   header: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     marginBottom: 18,
   },
 
-  eyebrow: {
-    color: "#8B1238",
-    fontSize: 10,
-    fontWeight: "800",
-    letterSpacing: 1.4,
-    marginBottom: 5,
+  headerText: {
+    flex: 1,
+    paddingRight: 10,
   },
 
-  heading: {
-    color: "#242124",
-    fontSize: 29,
-    fontWeight: "800",
+  brand: {
+    color: colors.Gold,
+    fontSize: 11,
+    fontWeight: "900",
+    letterSpacing: 0.8,
+    marginBottom: 4,
   },
 
-  subheading: {
-    color: "#81747C",
-    fontSize: 13,
+  title: {
+    fontSize: 28,
+    fontWeight: "900",
+    color: colors.DarkText,
+  },
+
+  subtitle: {
     marginTop: 4,
+    fontSize: 13,
+    color: colors.Gray,
   },
 
   addButton: {
-    backgroundColor: "#8B1238",
-    height: 46,
-    minWidth: 72,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-    flexDirection: "row",
-    paddingHorizontal: 12,
-    marginLeft: 10,
-  },
-
-  addPlus: {
-    color: "#FFFFFF",
-    fontSize: 18,
-    marginRight: 3,
+    backgroundColor: colors.PrimaryWine,
+    borderRadius: 12,
+    paddingHorizontal: 17,
+    paddingVertical: 11,
+    marginTop: 3,
   },
 
   addButtonText: {
-    color: "#FFFFFF",
+    color: colors.White,
     fontSize: 14,
-    fontWeight: "800",
+    fontWeight: "900",
   },
 
   customerCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 20,
+    backgroundColor: colors.White,
+    borderWidth: 1,
+    borderColor: colors.Border,
+    borderRadius: 17,
     padding: 15,
     flexDirection: "row",
     alignItems: "center",
-    borderWidth: 1,
-    borderColor: "#F0E3E8",
-    marginBottom: 15,
+    marginBottom: 13,
   },
 
-  avatar: {
-    width: 48,
-    height: 48,
-    borderRadius: 16,
-    backgroundColor: "#FCE8F0",
+  customerAvatar: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: colors.SoftPink,
     alignItems: "center",
     justifyContent: "center",
     marginRight: 12,
   },
 
-  avatarText: {
-    color: "#8B1238",
-    fontSize: 20,
+  customerAvatarText: {
+    color: colors.PrimaryWine,
     fontWeight: "900",
+    fontSize: 16,
+  },
+
+  customerInfo: {
+    flex: 1,
   },
 
   customerName: {
-    color: "#242124",
-    fontSize: 17,
-    fontWeight: "800",
+    fontSize: 16,
+    fontWeight: "900",
+    color: colors.DarkText,
   },
 
   customerPhone: {
-    color: "#8A7D84",
-    fontSize: 12,
     marginTop: 3,
+    fontSize: 12,
+    color: colors.Gray,
   },
 
-  countBox: {
-    minWidth: 55,
+  measurementCount: {
     alignItems: "center",
+    minWidth: 55,
   },
 
-  countNumber: {
-    color: "#8B1238",
-    fontSize: 20,
+  measurementCountNumber: {
+    color: colors.PrimaryWine,
+    fontSize: 18,
     fontWeight: "900",
   },
 
-  countLabel: {
-    color: "#8A7D84",
+  measurementCountLabel: {
+    color: colors.Gray,
     fontSize: 10,
-    marginTop: 1,
+    marginTop: 2,
   },
 
-  latestPanel: {
-    backgroundColor: "#8B1238",
-    borderRadius: 21,
-    padding: 17,
+  latestCard: {
+    backgroundColor: colors.PrimaryWine,
+    borderRadius: 18,
+    padding: 16,
     marginBottom: 15,
   },
 
@@ -1449,63 +1448,59 @@ const styles = StyleSheet.create({
     alignItems: "flex-start",
   },
 
-  latestKicker: {
-    color: "#F6DCA8",
-    fontSize: 9,
-    fontWeight: "900",
-    letterSpacing: 1.3,
-  },
-
   latestTitle: {
-    color: "#FFFFFF",
-    fontSize: 19,
-    fontWeight: "800",
-    marginTop: 3,
+    color: colors.White,
+    fontSize: 16,
+    fontWeight: "900",
   },
 
   latestDate: {
-    color: "#E8CBD5",
+    color: "#F3C4D5",
     fontSize: 11,
-    marginTop: 3,
+    marginTop: 4,
   },
 
-  latestView: {
-    color: "#F6DCA8",
-    fontSize: 13,
-    fontWeight: "800",
+  latestEdit: {
+    color: colors.White,
+    fontSize: 12,
+    fontWeight: "900",
+    borderWidth: 1,
+    borderColor: "#FFFFFF66",
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 8,
   },
 
-  latestStats: {
+  measurementGrid: {
     flexDirection: "row",
-    marginTop: 15,
-    paddingTop: 13,
-    borderTopWidth: 1,
-    borderTopColor:
-      "rgba(255,255,255,0.18)",
+    flexWrap: "wrap",
+    justifyContent: "space-between",
+    columnGap: 12,
+    marginTop: 14,
   },
 
-  latestStat: {
-    flex: 1,
+  measurementValue: {
+    width: "25%",
   },
 
-  statLabel: {
-    color: "#EACDD7",
-    fontSize: 10,
+  measurementValueLabel: {
+    color: "#F3C4D5",
+    fontSize: 9,
     marginBottom: 3,
   },
 
-  statValue: {
-    color: "#FFFFFF",
-    fontSize: 15,
-    fontWeight: "800",
+  measurementValueText: {
+    color: colors.White,
+    fontSize: 14,
+    fontWeight: "900",
   },
 
   searchBox: {
-    height: 48,
-    backgroundColor: "#FFFFFF",
+    height: 49,
+    backgroundColor: colors.White,
+    borderRadius: 13,
     borderWidth: 1,
-    borderColor: "#EADDE2",
-    borderRadius: 14,
+    borderColor: colors.Border,
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 13,
@@ -1513,501 +1508,612 @@ const styles = StyleSheet.create({
   },
 
   searchIcon: {
-    color: "#8B1238",
-    fontSize: 24,
-    marginRight: 7,
+    color: colors.PrimaryWine,
+    fontSize: 22,
+    marginRight: 8,
   },
 
   searchInput: {
     flex: 1,
-    color: "#242124",
+    color: colors.DarkText,
     fontSize: 14,
   },
 
   clearText: {
-    color: "#8B1238",
-    fontSize: 23,
+    fontSize: 24,
+    color: colors.Gray,
     paddingLeft: 8,
   },
 
-  filterContainer: {
+  filterContent: {
+    paddingBottom: 16,
     gap: 8,
-    paddingBottom: 18,
   },
 
-  filter: {
-    backgroundColor: "#FFFFFF",
+  filterButton: {
+    backgroundColor: colors.White,
     borderWidth: 1,
-    borderColor: "#E5D8DE",
-    borderRadius: 18,
-    paddingHorizontal: 14,
+    borderColor: colors.Border,
+    borderRadius: 20,
+    paddingHorizontal: 13,
     paddingVertical: 8,
   },
 
-  filterActive: {
-    backgroundColor: "#8B1238",
-    borderColor: "#8B1238",
+  filterButtonActive: {
+    backgroundColor: colors.PrimaryWine,
+    borderColor: colors.PrimaryWine,
   },
 
   filterText: {
-    color: "#6D6269",
-    fontSize: 12,
+    color: colors.Gray,
+    fontSize: 11,
     fontWeight: "700",
   },
 
   filterTextActive: {
-    color: "#FFFFFF",
+    color: colors.White,
   },
 
   historyHeader: {
     flexDirection: "row",
-    alignItems: "flex-end",
-    justifyContent: "space-between",
+    alignItems: "center",
     marginBottom: 10,
   },
 
-  sectionTitle: {
-    color: "#242124",
-    fontSize: 18,
-    fontWeight: "800",
-  },
-
-  sectionSubtitle: {
-    color: "#958990",
-    fontSize: 11,
-    marginTop: 3,
-  },
-
-  unitText: {
-    color: "#A2949B",
-    fontSize: 10,
-  },
-
-  card: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 19,
-    padding: 15,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: "#F0E4E8",
-  },
-
-  cardHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-
-  cardLeft: {
+  historyTitle: {
     flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-  },
-
-  measurementIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 13,
-    backgroundColor: "#FCE8F0",
-    alignItems: "center",
-    justifyContent: "center",
-    marginRight: 10,
-  },
-
-  measurementIconText: {
-    color: "#8B1238",
+    color: colors.DarkText,
+    fontSize: 18,
     fontWeight: "900",
-    fontSize: 16,
   },
 
-  titleRow: {
+  historyCount: {
+    minWidth: 29,
+    height: 29,
+    borderRadius: 15,
+    backgroundColor: colors.SoftPink,
+    color: colors.PrimaryWine,
+    textAlign: "center",
+    textAlignVertical: "center",
+    paddingTop: 6,
+    fontWeight: "900",
+    fontSize: 11,
+  },
+
+  historyCard: {
+    backgroundColor: colors.White,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: "#EADCE2",
+    padding: 17,
+    marginBottom: 15,
+    shadowColor: "#6D243F",
+    shadowOffset: {
+      width: 0,
+      height: 4,
+    },
+    shadowOpacity: 0.07,
+    shadowRadius: 10,
+    elevation: 3,
+  },
+
+  historyTop: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
   },
 
-  cardTitle: {
-    color: "#242124",
+  historyMain: {
+    flex: 1,
+  },
+
+  historyType: {
+    color: colors.DarkText,
     fontSize: 15,
-    fontWeight: "800",
-  },
-
-  latestBadge: {
-    backgroundColor: "#F7E8C8",
-    borderRadius: 8,
-    paddingHorizontal: 6,
-    paddingVertical: 3,
-    marginLeft: 7,
-  },
-
-  latestBadgeText: {
-    color: "#8A641B",
-    fontSize: 8,
     fontWeight: "900",
   },
 
-  cardDate: {
-    color: "#91858C",
+  historyDate: {
+    marginTop: 4,
+    color: colors.Gray,
     fontSize: 11,
-    marginTop: 3,
   },
 
-  editButton: {
+  smallEditButton: {
     borderWidth: 1,
-    borderColor: "#E6D6DD",
-    borderRadius: 10,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
+    borderColor: colors.PrimaryWine,
+    borderRadius: 8,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
   },
 
-  editButtonText: {
-    color: "#8B1238",
-    fontSize: 11,
-    fontWeight: "800",
-  },
-
-  previewContainer: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 7,
-    marginTop: 14,
-  },
-
-  previewChip: {
-    backgroundColor: "#FFF9F2",
-    borderRadius: 9,
-    paddingHorizontal: 8,
-    paddingVertical: 6,
-  },
-
-  previewText: {
-    color: "#5F555B",
+  smallEditText: {
+    color: colors.PrimaryWine,
     fontSize: 10,
-    fontWeight: "700",
+    fontWeight: "900",
   },
 
-  noMeasurementText: {
-    color: "#AA9EA5",
-    fontSize: 11,
+  historyMeasurements: {
+    flexDirection: "row",
     marginTop: 13,
-  },
-
-  cardNotes: {
-    color: "#756A71",
-    fontSize: 11,
-    lineHeight: 17,
-    marginTop: 10,
-  },
-
-  viewButton: {
-    marginTop: 13,
+    paddingTop: 12,
     borderTopWidth: 1,
-    borderTopColor: "#F2E8EB",
-    paddingTop: 11,
+    borderTopColor: colors.Border,
   },
 
-  viewButtonText: {
-    color: "#8B1238",
-    fontSize: 11,
+  smallMeasurement: {
+    flex: 1,
+  },
+
+  smallMeasurementLabel: {
+    fontSize: 9,
+    color: colors.Gray,
+  },
+
+  smallMeasurementValue: {
+    marginTop: 3,
+    color: colors.DarkText,
+    fontSize: 12,
     fontWeight: "800",
   },
 
-  emptyState: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 20,
-    padding: 28,
-    alignItems: "center",
+  notesPreview: {
+    marginTop: 10,
+    fontSize: 10,
+    color: colors.Gray,
+    fontStyle: "italic",
+  },
+
+  emptyCard: {
+    backgroundColor: colors.White,
+    borderRadius: 18,
     borderWidth: 1,
-    borderColor: "#F0E4E8",
+    borderColor: colors.Border,
+    alignItems: "center",
+    padding: 30,
   },
 
   emptyIcon: {
-    width: 56,
-    height: 56,
-    borderRadius: 18,
-    backgroundColor: "#FCE8F0",
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 12,
-  },
-
-  emptyIconText: {
-    color: "#8B1238",
-    fontSize: 23,
-    fontWeight: "900",
+    fontSize: 38,
   },
 
   emptyTitle: {
-    color: "#242124",
-    fontSize: 16,
-    fontWeight: "800",
+    marginTop: 10,
+    fontSize: 17,
+    fontWeight: "900",
+    color: colors.DarkText,
   },
 
-  emptyText: {
-    color: "#91858C",
-    textAlign: "center",
-    fontSize: 12,
-    lineHeight: 18,
+  emptySubtitle: {
     marginTop: 5,
+    color: colors.Gray,
+    fontSize: 12,
+    textAlign: "center",
   },
 
   emptyButton: {
-    backgroundColor: "#8B1238",
-    borderRadius: 12,
-    paddingHorizontal: 15,
+    marginTop: 16,
+    backgroundColor: colors.PrimaryWine,
+    borderRadius: 11,
+    paddingHorizontal: 17,
     paddingVertical: 10,
-    marginTop: 15,
   },
 
   emptyButtonText: {
-    color: "#FFFFFF",
-    fontSize: 12,
-    fontWeight: "800",
+    color: colors.White,
+    fontWeight: "900",
   },
 
-  bottomSpace: {
-    height: 30,
-  },
-
-  modalRoot: {
+  overlay: {
     flex: 1,
-  },
-
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor:
-      "rgba(30,20,25,0.52)",
+    backgroundColor: "rgba(20,10,15,0.5)",
     justifyContent: "flex-end",
   },
 
-  modalCard: {
-    backgroundColor: "#FFF9F2",
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
+  formModal: {
     maxHeight: "94%",
-    paddingHorizontal: 18,
-    paddingTop: 17,
+    backgroundColor: colors.Cream,
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    padding: 20,
   },
 
-  detailCard: {
-    backgroundColor: "#FFF9F2",
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
+  detailsModal: {
     maxHeight: "88%",
-    paddingHorizontal: 18,
-    paddingTop: 17,
+    backgroundColor: colors.Cream,
+    borderRadius: 26,
+    margin: 16,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: "#EADCE2",
+    shadowColor: "#6D243F",
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.14,
+    shadowRadius: 18,
+    elevation: 8,
   },
 
   modalHeader: {
     flexDirection: "row",
-    alignItems: "flex-start",
-    paddingBottom: 15,
-  },
-
-  modalKicker: {
-    color: "#8B1238",
-    fontSize: 9,
-    fontWeight: "900",
-    letterSpacing: 1.2,
+    alignItems: "center",
+    marginBottom: 18,
   },
 
   modalTitle: {
-    color: "#242124",
-    fontSize: 22,
+    color: colors.DarkText,
+    fontSize: 21,
     fontWeight: "900",
+  },
+
+  modalSubtitle: {
+    color: colors.Gray,
+    fontSize: 12,
     marginTop: 3,
   },
 
   closeButton: {
-    width: 36,
-    height: 36,
-    borderRadius: 12,
-    backgroundColor: "#F5E8ED",
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: colors.White,
     alignItems: "center",
     justifyContent: "center",
+    marginLeft: 10,
   },
 
   closeText: {
-    color: "#8B1238",
-    fontSize: 24,
-    lineHeight: 25,
+    color: colors.DarkText,
+    fontSize: 25,
+    marginTop: -2,
   },
 
   formSectionTitle: {
-    color: "#8B1238",
-    fontSize: 13,
+    color: colors.DarkText,
+    fontSize: 14,
     fontWeight: "900",
-    marginTop: 5,
+    marginTop: 10,
     marginBottom: 9,
   },
 
-  typeContainer: {
-    gap: 8,
-    paddingBottom: 2,
+  typeRow: {
+    gap: 7,
+    paddingBottom: 5,
   },
 
-  typePill: {
+  typeChip: {
+    backgroundColor: colors.White,
     borderWidth: 1,
-    borderColor: "#E4D7DD",
-    backgroundColor: "#FFFFFF",
-    borderRadius: 17,
+    borderColor: colors.Border,
+    borderRadius: 20,
     paddingHorizontal: 12,
     paddingVertical: 8,
   },
 
-  typePillActive: {
-    backgroundColor: "#8B1238",
-    borderColor: "#8B1238",
+  typeChipActive: {
+    backgroundColor: colors.PrimaryWine,
+    borderColor: colors.PrimaryWine,
   },
 
-  typePillText: {
-    color: "#6D6269",
-    fontSize: 11,
-    fontWeight: "700",
-  },
-
-  typePillTextActive: {
-    color: "#FFFFFF",
-  },
-
-  fieldLabel: {
-    color: "#4B4248",
+  typeChipText: {
+    color: colors.Gray,
     fontSize: 11,
     fontWeight: "800",
-    marginBottom: 6,
   },
 
-  fullInput: {
-    height: 45,
+  typeChipTextActive: {
+    color: colors.White,
+  },
+
+  twoColumn: {
+    flexDirection: "row",
+    gap: 10,
+  },
+
+  column: {
+    flex: 1,
+  },
+
+  measurementInput: {
+    width: "100%",
+    minWidth: 0,
+    minHeight: 48,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    fontSize: 14,
+    color: colors.DarkText,
     backgroundColor: "#FFFFFF",
     borderWidth: 1,
-    borderColor: "#E6D9DE",
+    borderColor: "#F3C4D5",
     borderRadius: 12,
-    paddingHorizontal: 12,
-    color: "#242124",
-    fontSize: 13,
+  },
+  measurementHelper: {
+    color: "#967986",
+    fontSize: 12,
+    marginTop: 4,
     marginBottom: 14,
   },
 
-  grid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "space-between",
-    marginBottom: 3,
+
+  measurementCard: {
+    width: "48%",
+    backgroundColor: "#FFF5F8",
+    borderWidth: 1,
+    borderColor: "#F3C4D5",
+    borderRadius: 14,
+    padding: 10,
+    marginBottom: 8,
+  },
+  fieldContainer: {
+    marginBottom: 9,
   },
 
-  field: {
-    width: "48%",
-    marginBottom: 12,
+  fieldLabel: {
+    color: "#71334F",
+    fontSize: 12,
+    fontWeight: "700",
+    marginBottom: 7,
   },
 
   input: {
-    height: 43,
-    backgroundColor: "#FFFFFF",
+    minHeight: 46,
+    backgroundColor: colors.White,
     borderWidth: 1,
-    borderColor: "#E6D9DE",
-    borderRadius: 12,
-    paddingHorizontal: 11,
-    color: "#242124",
+    borderColor: colors.Border,
+    borderRadius: 11,
+    paddingHorizontal: 12,
+    color: colors.DarkText,
     fontSize: 13,
   },
 
   notesInput: {
-    minHeight: 88,
-    backgroundColor: "#FFFFFF",
-    borderWidth: 1,
-    borderColor: "#E6D9DE",
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingTop: 11,
-    color: "#242124",
-    fontSize: 13,
-    marginBottom: 16,
+    minHeight: 85,
+    paddingTop: 12,
+    textAlignVertical: "top",
   },
 
-  saveButton: {
-    backgroundColor: "#8B1238",
-    borderRadius: 14,
-    minHeight: 49,
+  photoHint: {
+    color: "#947783",
+    fontSize: 12,
+    textAlign: "center",
+    marginTop: 8,
+    marginBottom: 10,
+  },
+
+  photoPickerButton: {
+    minHeight: 115,
+    width: "100%",
+    alignSelf: "center",
+    backgroundColor: "#FFF5F8",
+    borderWidth: 1,
+    borderColor: "#F3C4D5",
+    borderStyle: "dashed",
+    borderRadius: 16,
+    flexDirection: "column",
     alignItems: "center",
     justifyContent: "center",
-    marginTop: 2,
+    gap: 6,
+    marginTop: 8,
   },
 
-  disabledButton: {
-    opacity: 0.6,
+  photoPickerIcon: {
+    color: "#AD1457",
+    fontSize: 32,
+    fontWeight: "500",
+  },
+
+  photoPickerText: {
+    color: "#AD1457",
+    fontSize: 14,
+    fontWeight: "800",
+  },
+
+  photoGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+    marginTop: 12,
+  },
+
+  photoCard: {
+    width: 88,
+    height: 88,
+    borderRadius: 12,
+    overflow: "hidden",
+    backgroundColor: colors.LightGray,
+  },
+
+  fabricPhoto: {
+    width: "100%",
+    height: "100%",
+  },
+
+  removePhotoButton: {
+    position: "absolute",
+    top: 4,
+    right: 4,
+    width: 25,
+    height: 25,
+    borderRadius: 13,
+    backgroundColor: colors.PrimaryWine,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  removePhotoText: {
+    color: colors.White,
+    fontSize: 20,
+    fontWeight: "900",
+    lineHeight: 23,
+  },
+
+  roughNotesInput: {
+    minHeight: 150,
+    borderColor: "#F3C4D5",
+    backgroundColor: "#FFFFFF",
+    borderRadius: 14,
+    textAlignVertical: "top",
+    paddingTop: 14,
+    paddingHorizontal: 14,
+    fontSize: 14,
+    lineHeight: 21,
+  },
+  saveButton: {
+    minHeight: 50,
+    backgroundColor: colors.PrimaryWine,
+    borderRadius: 13,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 20,
   },
 
   saveButtonText: {
-    color: "#FFFFFF",
-    fontSize: 13,
+    color: colors.White,
+    fontSize: 15,
     fontWeight: "900",
   },
 
   cancelButton: {
-    minHeight: 45,
+    minHeight: 48,
+    backgroundColor: colors.White,
+    borderRadius: 13,
+    borderWidth: 1,
+    borderColor: colors.Border,
     alignItems: "center",
     justifyContent: "center",
-    marginTop: 5,
+    marginTop: 9,
   },
 
   cancelButtonText: {
-    color: "#8B1238",
-    fontSize: 13,
+    color: colors.DarkText,
     fontWeight: "800",
   },
 
-  detailDate: {
-    color: "#91858C",
-    fontSize: 12,
-    marginTop: 4,
+  detailsSection: {
+    backgroundColor: colors.White,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "#EADCE2",
+    padding: 16,
+    marginBottom: 14,
+    shadowColor: "#6D243F",
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
   },
 
-  detailGrid: {
+  detailsSectionTitle: {
+    color: colors.PrimaryWine,
+    fontSize: 16,
+    fontWeight: "900",
+    marginBottom: 14,
+    letterSpacing: 0.2,
+  },
+
+  detailsGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
-    justifyContent: "space-between",
+    gap: 10,
   },
 
   detailItem: {
     width: "48%",
-    backgroundColor: "#FFFFFF",
-    borderRadius: 13,
-    padding: 12,
-    marginBottom: 9,
+    backgroundColor: "#FFF4F7",
+    borderRadius: 14,
     borderWidth: 1,
-    borderColor: "#F0E4E8",
+    borderColor: "#F0DCE4",
+    padding: 13,
+    minHeight: 68,
+    justifyContent: "center",
   },
 
   detailLabel: {
-    color: "#8D8087",
+    color: colors.Gray,
     fontSize: 10,
     fontWeight: "700",
+    letterSpacing: 0.3,
   },
 
   detailValue: {
-    color: "#242124",
-    fontSize: 17,
+    color: colors.PrimaryWine,
+    fontSize: 16,
     fontWeight: "900",
-    marginTop: 3,
+    marginTop: 5,
   },
 
-  notesBox: {
-    backgroundColor: "#FCE8F0",
-    borderRadius: 14,
-    padding: 13,
-    marginVertical: 5,
-    marginBottom: 15,
+  detailsNotes: {
+    color: colors.DarkText,
+    fontSize: 14,
+    lineHeight: 22,
+    backgroundColor: "#FFF4F7",
+    borderRadius: 12,
+    padding: 12,
   },
 
-  notesBoxTitle: {
-    color: "#8B1238",
-    fontSize: 11,
+  detailsActions: {
+    marginTop: 4,
+    marginBottom: 12,
+  },
+
+  detailsEditButton: {
+    backgroundColor: colors.PrimaryWine,
+    borderRadius: 16,
+    minHeight: 54,
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#6D243F",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+
+  detailsEditText: {
+    color: colors.White,
     fontWeight: "900",
-    marginBottom: 4,
+    fontSize: 15,
+    letterSpacing: 0.3,
   },
 
-  notesBoxText: {
-    color: "#594E54",
-    fontSize: 12,
-    lineHeight: 18,
+  detailsDeleteButton: {
+    backgroundColor: "#FFF1F1",
+    borderWidth: 1,
+    borderColor: "#F3B8B8",
+    borderRadius: 16,
+    minHeight: 50,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 10,
+  },
+
+  detailsDeleteText: {
+    color: colors.Red,
+    fontWeight: "900",
+    fontSize: 14,
+  },
+
+  detailsCloseButton: {
+    backgroundColor: colors.White,
+    borderWidth: 1,
+    borderColor: "#EADCE2",
+    borderRadius: 16,
+    minHeight: 50,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 10,
+  },
+
+  detailsCloseButtonText: {
+    color: colors.PrimaryWine,
+    fontWeight: "900",
+    fontSize: 14,
   },
 });
+
+
+
+
+
+
+
+
+

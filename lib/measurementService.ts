@@ -1,140 +1,345 @@
 import { supabase } from "./supabase";
 
-export type SupabaseMeasurement = {
+export type Measurement = {
   id: string;
-  customer_id: string;
+  customerId?: string;
+
   date: string;
   type: string;
-  bust: string | null;
-  waist: string | null;
-  hip: string | null;
-  shoulder: string | null;
-  sleeve_length: string | null;
-  blouse_length: string | null;
-  front_neck: string | null;
-  back_neck: string | null;
-  armhole: string | null;
-  pant_length: string | null;
+
+  bust: string;
+  waist: string;
+  hip: string;
+  shoulder: string;
+
+  sleeveLength: string;
+  blouseLength: string;
+  frontNeck: string;
+  backNeck: string;
+  armhole: string;
+  pantLength: string;
+
+  // Backward compatibility with existing App.tsx
+  sleeve_length?: string;
+  blouse_length?: string;
+  front_neck?: string;
+  back_neck?: string;
+  pant_length?: string;
+
+  notes: string;
+};
+
+type MeasurementRow = {
+  id: string;
+  customer_id: string | null;
+
+  date: string | null;
+  type: string | null;
+
+  bust: string | number | null;
+  waist: string | number | null;
+  hip: string | number | null;
+  shoulder: string | number | null;
+
+  sleeve_length: string | number | null;
+  blouse_length: string | number | null;
+  front_neck: string | number | null;
+  back_neck: string | number | null;
+  armhole: string | number | null;
+  pant_length: string | number | null;
+
   notes: string | null;
-  created_at: string;
-  updated_at: string;
+
+  created_at?: string | null;
+  updated_at?: string | null;
 };
 
-export type CreateMeasurementInput = {
-  customerId: string;
-  date: string;
-  type: string;
-  bust: string;
-  waist: string;
-  hip: string;
-  shoulder: string;
-  sleeveLength: string;
-  blouseLength: string;
-  frontNeck: string;
-  backNeck: string;
-  armhole: string;
-  pantLength: string;
-  notes: string;
+const textValue = (
+  value: string | number | null | undefined
+): string => {
+  if (
+    value === null ||
+    value === undefined
+  ) {
+    return "";
+  }
+
+  return String(value);
 };
 
-export type UpdateMeasurementInput = {
-  date: string;
-  type: string;
-  bust: string;
-  waist: string;
-  hip: string;
-  shoulder: string;
-  sleeveLength: string;
-  blouseLength: string;
-  frontNeck: string;
-  backNeck: string;
-  armhole: string;
-  pantLength: string;
-  notes: string;
+const mapMeasurement = (
+  row: MeasurementRow
+): Measurement => {
+  const sleeveLength =
+    textValue(row.sleeve_length);
+
+  const blouseLength =
+    textValue(row.blouse_length);
+
+  const frontNeck =
+    textValue(row.front_neck);
+
+  const backNeck =
+    textValue(row.back_neck);
+
+  const pantLength =
+    textValue(row.pant_length);
+
+  return {
+    id: row.id,
+
+    customerId:
+      row.customer_id ?? undefined,
+
+    date: row.date ?? "",
+
+    type:
+      row.type ?? "Custom",
+
+    bust:
+      textValue(row.bust),
+
+    waist:
+      textValue(row.waist),
+
+    hip:
+      textValue(row.hip),
+
+    shoulder:
+      textValue(row.shoulder),
+
+    sleeveLength,
+
+    blouseLength,
+
+    frontNeck,
+
+    backNeck,
+
+    armhole:
+      textValue(row.armhole),
+
+    pantLength,
+
+    // Backward-compatible aliases
+    sleeve_length:
+      sleeveLength,
+
+    blouse_length:
+      blouseLength,
+
+    front_neck:
+      frontNeck,
+
+    back_neck:
+      backNeck,
+
+    pant_length:
+      pantLength,
+
+    notes:
+      row.notes ?? "",
+  };
 };
 
-function cleanValue(value: string): string | null {
-  const cleaned = value.trim();
+const toDatabasePayload = (
+  measurement: Omit<
+    Measurement,
+    "id"
+  >
+) => {
+  return {
+    customer_id:
+      measurement.customerId ?? null,
 
-  return cleaned === "" ? null : cleaned;
-}
+    date:
+      measurement.date,
 
-export async function fetchMeasurements(
-  customerId: string
-): Promise<SupabaseMeasurement[]> {
-  const { data, error } = await supabase
-    .from("measurements")
-    .select("*")
-    .eq("customer_id", customerId)
-    .order("created_at", { ascending: false });
+    type:
+      measurement.type,
 
-  if (error) {
-    throw new Error(error.message);
-  }
+    bust:
+      measurement.bust,
 
-  return (data ?? []) as SupabaseMeasurement[];
-}
+    waist:
+      measurement.waist,
 
-export async function createMeasurement(
-  input: CreateMeasurementInput
-): Promise<SupabaseMeasurement> {
-  const { data, error } = await supabase
-    .from("measurements")
-    .insert({
-      customer_id: input.customerId,
-      date: input.date,
-      type: input.type.trim(),
-      bust: cleanValue(input.bust),
-      waist: cleanValue(input.waist),
-      hip: cleanValue(input.hip),
-      shoulder: cleanValue(input.shoulder),
-      sleeve_length: cleanValue(input.sleeveLength),
-      blouse_length: cleanValue(input.blouseLength),
-      front_neck: cleanValue(input.frontNeck),
-      back_neck: cleanValue(input.backNeck),
-      armhole: cleanValue(input.armhole),
-      pant_length: cleanValue(input.pantLength),
-      notes: cleanValue(input.notes),
-    })
-    .select()
-    .single();
+    hip:
+      measurement.hip,
 
-  if (error) {
-    throw new Error(error.message);
-  }
+    shoulder:
+      measurement.shoulder,
 
-  return data as SupabaseMeasurement;
-}
+    sleeve_length:
+      measurement.sleeveLength ??
+      measurement.sleeve_length ??
+      "",
 
-export async function updateMeasurement(
-  measurementId: string,
-  input: UpdateMeasurementInput
-): Promise<SupabaseMeasurement> {
-  const { data, error } = await supabase
-    .from("measurements")
-    .update({
-      date: input.date,
-      type: input.type.trim(),
-      bust: cleanValue(input.bust),
-      waist: cleanValue(input.waist),
-      hip: cleanValue(input.hip),
-      shoulder: cleanValue(input.shoulder),
-      sleeve_length: cleanValue(input.sleeveLength),
-      blouse_length: cleanValue(input.blouseLength),
-      front_neck: cleanValue(input.frontNeck),
-      back_neck: cleanValue(input.backNeck),
-      armhole: cleanValue(input.armhole),
-      pant_length: cleanValue(input.pantLength),
-      notes: cleanValue(input.notes),
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", measurementId)
-    .select()
-    .single();
+    blouse_length:
+      measurement.blouseLength ??
+      measurement.blouse_length ??
+      "",
 
-  if (error) {
-    throw new Error(error.message);
-  }
+    front_neck:
+      measurement.frontNeck ??
+      measurement.front_neck ??
+      "",
 
-  return data as SupabaseMeasurement;
-}
+    back_neck:
+      measurement.backNeck ??
+      measurement.back_neck ??
+      "",
+
+    armhole:
+      measurement.armhole,
+
+    pant_length:
+      measurement.pantLength ??
+      measurement.pant_length ??
+      "",
+
+    notes:
+      measurement.notes,
+  };
+};
+
+export const fetchMeasurements =
+  async (
+    customerId?: string
+  ): Promise<Measurement[]> => {
+    let query = supabase
+      .from("measurements")
+      .select("*")
+      .order("date", {
+        ascending: false,
+      });
+
+    if (customerId) {
+      query = query.eq(
+        "customer_id",
+        customerId
+      );
+    }
+
+    const {
+      data,
+      error,
+    } = await query;
+
+    if (error) {
+      console.error(
+        "FETCH MEASUREMENTS ERROR:",
+        error
+      );
+
+      throw error;
+    }
+
+    return (
+      data ?? []
+    ).map(
+      (
+        row: MeasurementRow
+      ) =>
+        mapMeasurement(row)
+    );
+  };
+
+export const createMeasurement =
+  async (
+    measurement: Omit<
+      Measurement,
+      "id"
+    >
+  ): Promise<Measurement> => {
+    const payload =
+      toDatabasePayload(
+        measurement
+      );
+
+    const {
+      data,
+      error,
+    } = await supabase
+      .from("measurements")
+      .insert(payload)
+      .select("*")
+      .single();
+
+    if (error) {
+      console.error(
+        "CREATE MEASUREMENT ERROR:",
+        error
+      );
+
+      throw error;
+    }
+
+    return mapMeasurement(
+      data as MeasurementRow
+    );
+  };
+
+export const updateMeasurement =
+  async (
+    measurementId: string,
+    measurement: Omit<
+      Measurement,
+      "id"
+    >
+  ): Promise<Measurement> => {
+    const payload =
+      toDatabasePayload(
+        measurement
+      );
+
+    const {
+      data,
+      error,
+    } = await supabase
+      .from("measurements")
+      .update(payload)
+      .eq(
+        "id",
+        measurementId
+      )
+      .select("*")
+      .single();
+
+    if (error) {
+      console.error(
+        "UPDATE MEASUREMENT ERROR:",
+        error
+      );
+
+      throw error;
+    }
+
+    return mapMeasurement(
+      data as MeasurementRow
+    );
+  };
+
+export const deleteMeasurement =
+  async (
+    measurementId: string
+  ): Promise<void> => {
+    const {
+      error,
+    } = await supabase
+      .from("measurements")
+      .delete()
+      .eq(
+        "id",
+        measurementId
+      );
+
+    if (error) {
+      console.error(
+        "DELETE MEASUREMENT ERROR:",
+        error
+      );
+
+      throw error;
+    }
+  };

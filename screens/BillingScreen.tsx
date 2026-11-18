@@ -1,5 +1,7 @@
+﻿import { MaterialCommunityIcons } from "@expo/vector-icons";
 import React, { useMemo, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Modal,
   ScrollView,
@@ -10,52 +12,30 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-
 import * as Print from "expo-print";
 
 import type { Customer } from "./CustomersScreen";
 import type { Order } from "./OrdersScreen";
+import type {
+  Bill,
+  BillStatus,
+  Payment,
+  PaymentMethod,
+} from "../lib/billService";
 
-/* =========================================================
-   TYPES
-========================================================= */
-
-export type PaymentMethod =
-  | "Cash"
-  | "UPI"
-  | "Card"
-  | "Other";
-
-export type BillStatus =
-  | "Unpaid"
-  | "Partially Paid"
-  | "Paid";
-
-export type Payment = {
-  id: string;
-  billId: string;
-  amount: number;
-  method: PaymentMethod;
-  paymentDate: string;
-};
-
-export type Bill = {
-  id: string;
-  orderId: string;
-  customerId: string;
-  customerName: string;
-  item: string;
-  quantity: number;
-  price: number;
-  subtotal: number;
-  discount: number;
-  tax: number;
-  total: number;
-  paidAmount: number;
-  balance: number;
-  paymentMethod: PaymentMethod;
-  status: BillStatus;
-  billDate: string;
+const colors = {
+  PrimaryWine: "#AD1457",
+  Magenta: "#AD1457",
+  Gold: "#AD1457",
+  Cream: "#FFF5F8",
+  SoftPink: "#FCE5EF",
+  DarkText: "#242124",
+  White: "#FFFFFF",
+  Muted: "#81777D",
+  Border: "#F3C6D8",
+  Green: "#27844B",
+  Red: "#C43D4B",
+  Orange: "#D9822B",
 };
 
 type BillingScreenProps = {
@@ -63,573 +43,468 @@ type BillingScreenProps = {
   orders: Order[];
   bills: Bill[];
   payments: Payment[];
+  onBack: () => void;
   onCreateBill: (
     bill: Bill,
-    payment?: Payment
+    initialPayment?: Payment
   ) => void;
+  onAddPayment: (payment: Payment, updatedBill: Bill) => Promise<boolean>;
   onUpdateBill: (bill: Bill) => void;
-  onAddPayment: (payment: Payment) => void;
-  onBack: () => void;
+  onOpenReceipt: () => void;
 };
 
-/* =========================================================
-   BRAND
-========================================================= */
+const money = (value: number | string | null | undefined) => {
+  const amount = Number(value || 0);
 
-const colors = {
-  PrimaryWine: "#8B1238",
-  Magenta: "#C2185B",
-  Gold: "#C69A3A",
-  Cream: "#FFF9F2",
-  SoftPink: "#FCE8F0",
-  DarkText: "#242124",
-  White: "#FFFFFF",
-  Border: "#E8D9DE",
-  Muted: "#777277",
-  Green: "#2E7D32",
-  Red: "#C62828",
-  Orange: "#EF6C00",
-};
-
-/* =========================================================
-   HELPERS
-========================================================= */
-
-const formatMoney = (value: number) =>
-  `₹${Number(value || 0).toLocaleString("en-IN", {
+  return "Rs. " + amount.toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  })}`;
+  });
+};
 
-const formatDate = (value: string) => {
-  if (!value) return "";
+const formatDate = (value: string | Date | null | undefined) => {
+  if (!value) return "-";
 
   const date = new Date(value);
 
   if (Number.isNaN(date.getTime())) {
-    return value;
+    return String(value);
   }
 
-  return date.toLocaleDateString("en-IN");
+  return date.toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
 };
 
-const todayString = () => {
-  const now = new Date();
+const today = () => {
+  const date = new Date();
 
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-
-  return `${year}-${month}-${day}`;
+  return date.toISOString().split("T")[0];
 };
 
-const createId = (prefix: string) =>
-  `${prefix}_${Date.now()}_${Math.random()
+const makeId = (prefix: string) => {
+  return `${prefix}-${Date.now()}-${Math.random()
     .toString(36)
-    .substring(2, 8)}`;
-
-const escapeHtml = (value: unknown) =>
-  String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-
-/* =========================================================
-   RECEIPT HTML
-========================================================= */
-
-const buildReceiptHtml = (
-  bill: Bill,
-  payments: Payment[]
-) => {
-  const billPayments = payments.filter(
-    (payment) => payment.billId === bill.id
-  );
-
-  const paymentRows =
-    billPayments.length > 0
-      ? billPayments
-          .map(
-            (payment) => `
-              <tr>
-                <td>${escapeHtml(
-                  formatDate(payment.paymentDate)
-                )}</td>
-                <td>${escapeHtml(payment.method)}</td>
-                <td style="text-align:right;">
-                  ${escapeHtml(formatMoney(payment.amount))}
-                </td>
-              </tr>
-            `
-          )
-          .join("")
-      : `
-          <tr>
-            <td colspan="3" style="text-align:center;">
-              No payments recorded
-            </td>
-          </tr>
-        `;
-
-  return `
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8" />
-
-<style>
-
-body {
-  font-family: Arial, Helvetica, sans-serif;
-  margin: 0;
-  padding: 30px;
-  color: #242124;
-  background: #ffffff;
-}
-
-.invoice {
-  max-width: 760px;
-  margin: auto;
-}
-
-.header {
-  text-align: center;
-  border-bottom: 2px solid #8B1238;
-  padding-bottom: 18px;
-  margin-bottom: 20px;
-}
-
-.brand {
-  font-size: 28px;
-  font-weight: bold;
-  color: #8B1238;
-}
-
-.tagline {
-  color: #777277;
-  margin-top: 5px;
-}
-
-.invoice-title {
-  margin-top: 18px;
-  font-size: 22px;
-  font-weight: bold;
-}
-
-.info {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 25px;
-}
-
-.info-box {
-  width: 48%;
-}
-
-.label {
-  color: #777277;
-  font-size: 12px;
-  margin-bottom: 3px;
-}
-
-.value {
-  font-size: 15px;
-  font-weight: bold;
-}
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 15px;
-}
-
-th {
-  background: #8B1238;
-  color: white;
-  padding: 10px;
-  text-align: left;
-}
-
-td {
-  border-bottom: 1px solid #eeeeee;
-  padding: 10px;
-}
-
-.summary {
-  width: 300px;
-  margin-left: auto;
-  margin-top: 20px;
-}
-
-.summary-row {
-  display: flex;
-  justify-content: space-between;
-  padding: 6px 0;
-}
-
-.total {
-  border-top: 2px solid #8B1238;
-  margin-top: 8px;
-  padding-top: 10px;
-  font-size: 18px;
-  font-weight: bold;
-}
-
-.balance {
-  color: #C2185B;
-  font-size: 18px;
-  font-weight: bold;
-}
-
-.footer {
-  text-align: center;
-  margin-top: 40px;
-  padding-top: 15px;
-  border-top: 1px solid #eeeeee;
-  color: #777277;
-  font-size: 12px;
-}
-
-</style>
-</head>
-
-<body>
-
-<div class="invoice">
-
-  <div class="header">
-    <div class="brand">
-      Femme Fatale Boutique
-    </div>
-
-    <div class="tagline">
-      Style Speaks Louder ♡
-    </div>
-
-    <div class="invoice-title">
-      INVOICE
-    </div>
-  </div>
-
-  <div class="info">
-
-    <div class="info-box">
-      <div class="label">CUSTOMER</div>
-      <div class="value">
-        ${escapeHtml(bill.customerName)}
-      </div>
-
-      <div style="margin-top:12px;">
-        <div class="label">ITEM</div>
-        <div class="value">
-          ${escapeHtml(bill.item)}
-        </div>
-      </div>
-    </div>
-
-    <div class="info-box">
-      <div class="label">BILL DATE</div>
-      <div class="value">
-        ${escapeHtml(formatDate(bill.billDate))}
-      </div>
-
-      <div style="margin-top:12px;">
-        <div class="label">BILL ID</div>
-        <div class="value">
-          ${escapeHtml(bill.id)}
-        </div>
-      </div>
-    </div>
-
-  </div>
-
-  <table>
-
-    <thead>
-      <tr>
-        <th>Item</th>
-        <th>Qty</th>
-        <th>Rate</th>
-        <th style="text-align:right;">Amount</th>
-      </tr>
-    </thead>
-
-    <tbody>
-
-      <tr>
-        <td>${escapeHtml(bill.item)}</td>
-
-        <td>
-          ${escapeHtml(bill.quantity)}
-        </td>
-
-        <td>
-          ${escapeHtml(formatMoney(bill.price))}
-        </td>
-
-        <td style="text-align:right;">
-          ${escapeHtml(formatMoney(bill.subtotal))}
-        </td>
-      </tr>
-
-    </tbody>
-
-  </table>
-
-  <div class="summary">
-
-    <div class="summary-row">
-      <span>Subtotal</span>
-      <span>${escapeHtml(
-        formatMoney(bill.subtotal)
-      )}</span>
-    </div>
-
-    <div class="summary-row">
-      <span>Discount</span>
-      <span>- ${escapeHtml(
-        formatMoney(bill.discount)
-      )}</span>
-    </div>
-
-    <div class="summary-row">
-      <span>Tax</span>
-      <span>${escapeHtml(
-        formatMoney(bill.tax)
-      )}</span>
-    </div>
-
-    <div class="summary-row total">
-      <span>Total</span>
-      <span>${escapeHtml(
-        formatMoney(bill.total)
-      )}</span>
-    </div>
-
-    <div class="summary-row">
-      <span>Paid</span>
-      <span>${escapeHtml(
-        formatMoney(bill.paidAmount)
-      )}</span>
-    </div>
-
-    <div class="summary-row balance">
-      <span>Balance</span>
-      <span>${escapeHtml(
-        formatMoney(bill.balance)
-      )}</span>
-    </div>
-
-  </div>
-
-  <h3 style="margin-top:35px;">
-    Payment History
-  </h3>
-
-  <table>
-
-    <thead>
-      <tr>
-        <th>Date</th>
-        <th>Method</th>
-        <th style="text-align:right;">
-          Amount
-        </th>
-      </tr>
-    </thead>
-
-    <tbody>
-
-      ${paymentRows}
-
-    </tbody>
-
-  </table>
-
-  <div class="footer">
-
-    Thank you for choosing
-    <strong>Femme Fatale Boutique</strong>.
-
-    <br />
-
-    Style Speaks Louder ♡
-
-  </div>
-
-</div>
-
-</body>
-</html>
-`;
+    .slice(2, 7)}`;
 };
 
-/* =========================================================
-   MAIN COMPONENT
-========================================================= */
+const calculateStatus = (
+  total: number,
+  paid: number
+): BillStatus => {
+  if (paid <= 0) {
+    return "Unpaid";
+  }
+
+  if (paid >= total) {
+    return "Paid";
+  }
+
+  return "Partially Paid";
+};
+
+const statusColor = (status: BillStatus) => {
+  switch (status) {
+    case "Paid":
+      return colors.Green;
+
+    case "Partially Paid":
+      return colors.Orange;
+
+    default:
+      return colors.Red;
+  }
+};
+
+const statusBackground = (status: BillStatus) => {
+  switch (status) {
+    case "Paid":
+      return "#E8F6EC";
+
+    case "Partially Paid":
+      return "#FFF3E2";
+
+    default:
+      return "#FCEBED";
+  }
+};
+
+/*
+ * IMPORTANT:
+ * Always prefer billNumber.
+ * If a bill was created using BILL-xxxx as its id,
+ * that id is also accepted as the invoice number.
+ */
+const getInvoiceNumber = (bill: Bill) => {
+  const billNumber = String(
+    bill.billNumber ?? ""
+  ).trim();
+
+  if (billNumber) {
+    return billNumber;
+  }
+
+  const billId = String(
+    bill.id ?? ""
+  ).trim();
+
+  if (billId.startsWith("BILL-")) {
+    return billId;
+  }
+
+  return billId || "-";
+};
 
 export default function BillingScreen({
   customers,
   orders,
   bills,
   payments,
-  onCreateBill,
-  onUpdateBill,
-  onAddPayment,
   onBack,
+  onCreateBill,
+  onAddPayment,
+  onUpdateBill,
+  onOpenReceipt,
 }: BillingScreenProps) {
-
   const [search, setSearch] = useState("");
+  const [filter, setFilter] = useState<
+    "All" | BillStatus
+  >("All");
 
-  const [statusFilter, setStatusFilter] =
-    useState<"All" | BillStatus>("All");
+  const [
+    showCreateModal,
+    setShowCreateModal,
+  ] = useState(false);
 
-  const [showCreateModal, setShowCreateModal] =
-    useState(false);
+  const [
+    showDetailsModal,
+    setShowDetailsModal,
+  ] = useState(false);
 
-  const [showDetailsModal, setShowDetailsModal] =
-    useState(false);
+  const [
+    showPaymentModal,
+    setShowPaymentModal,
+  ] = useState(false);
 
-  const [showPaymentModal, setShowPaymentModal] =
-    useState(false);
+  const [
+    showReceiptModal,
+    setShowReceiptModal,
+  ] = useState(false);
 
-  const [showReceiptModal, setShowReceiptModal] =
-    useState(false);
+  const [
+    selectedBill,
+    setSelectedBill,
+  ] = useState<Bill | null>(null);
 
-  const [selectedBill, setSelectedBill] =
-    useState<Bill | null>(null);
+  const [
+    selectedCustomerId,
+    setSelectedCustomerId,
+  ] = useState("");
 
-  const [receiptBusy, setReceiptBusy] =
-    useState<"export" | "print" | "share" | null>(
-      null
+  const [
+    selectedOrderId,
+    setSelectedOrderId,
+  ] = useState("");
+
+  
+const [item,setItem] = useState("");
+
+const [quantity,setQuantity] = useState("1");
+
+const [price,setPrice] = useState("");
+
+const [discount,setDiscount] = useState("0");
+
+const [tax,setTax] = useState("0");
+
+
+
+
+const [orderItems,setOrderItems] = useState([
+ {
+  description:"Plain Salwar Suit",
+  quantity:1,
+  amount:""
+ },
+ {
+  description:"Lining Salwar Suit",
+  quantity:1,
+  amount:""
+ },
+ {
+  description:"Gagras",
+  quantity:1,
+  amount:""
+ },
+ {
+  description:"Langa-Blouse",
+  quantity:1,
+  amount:""
+ },
+ {
+  description:"Models",
+  quantity:1,
+  amount:""
+ },
+ {
+  description:"Blouse",
+  quantity:1,
+  amount:""
+ },
+ {
+  description:"Sarees",
+  quantity:1,
+  amount:""
+ }
+]);
+
+const [items, setItems] = useState<
+{
+  name: string;
+  quantity: number;
+  amount: number;
+}[]
+>([]);
+
+
+
+
+const [advancePaid,setAdvancePaid] = useState("");
+
+const [mobileNumber,setMobileNumber] = useState("");
+
+const [dueDate,setDueDate] = useState("");
+
+const [orderStatus,setOrderStatus] = useState("Cutting");
+
+
+
+const updateOrderItemAmount = (
+ index:number,
+ value:string
+)=>{
+ setOrderItems(prev =>
+   prev.map((item,i)=>
+     i===index
+       ? {...item,amount:value}
+       : item
+   )
+ );
+};
+
+
+const addOrderItem = ()=>{
+ setOrderItems(prev=>[
+   ...prev,
+   {
+    description:"New Item",
+    quantity:1,
+    amount:""
+   }
+ ]);
+};
+
+
+const removeOrderItem = (
+ index:number
+)=>{
+ setOrderItems(prev =>
+   prev.filter((_,i)=>i!==index)
+ );
+};
+const totalAmount =
+orderItems.reduce(
+  (sum,item)=>
+    sum + Number(item.amount || 0),
+  0
+);
+const balance =
+totalAmount -
+Number(advancePaid || 0);
+
+  const [
+    paymentMethod,
+    setPaymentMethod,
+  ] = useState<PaymentMethod>("Cash");
+
+  const [advance, setAdvance] = useState("0");
+
+  const [
+    paymentAmount,
+    setPaymentAmount,
+  ] = useState("");
+
+  const [
+    paymentMethodForNewPayment,
+    setPaymentMethodForNewPayment,
+  ] = useState<PaymentMethod>("Cash");
+
+  const [
+    receiptBusy,
+    setReceiptBusy,
+  ] = useState<"print" | "share" | null>(null);
+
+  const customerOrders = useMemo(() => {
+    if (!selectedCustomerId) {
+      return [];
+    }
+
+    return orders.filter(
+      (order: any) =>
+        String(
+          order.customerId ??
+            order.customer_id ??
+            ""
+        ) === String(selectedCustomerId)
     );
+  }, [
+    orders,
+    selectedCustomerId,
+  ]);
 
-  const [selectedCustomerId, setSelectedCustomerId] =
-    useState("");
-
-  const [selectedOrderId, setSelectedOrderId] =
-    useState("");
-
-  const [item, setItem] = useState("");
-
-  const [quantity, setQuantity] =
-    useState("1");
-
-  const [price, setPrice] =
-    useState("");
-
-  const [discount, setDiscount] =
-    useState("0");
-
-  const [tax, setTax] =
-    useState("0");
-
-  const [advance, setAdvance] =
-    useState("");
-
-  const [paymentMethod, setPaymentMethod] =
-    useState<PaymentMethod>("Cash");
-
-  const [paymentAmount, setPaymentAmount] =
-    useState("");
-
-  const [newPaymentMethod, setNewPaymentMethod] =
-    useState<PaymentMethod>("Cash");
-
-  /* =======================================================
-     CALCULATIONS
-  ======================================================= */
-
-  const quantityNumber =
-    Number(quantity) || 0;
-
-  const priceNumber =
-    Number(price) || 0;
-
-  const discountNumber =
-    Number(discount) || 0;
-
-  const taxNumber =
-    Number(tax) || 0;
-
-  const subtotal =
-    quantityNumber * priceNumber;
-
-  const total = Math.max(
-    0,
-    subtotal - discountNumber + taxNumber
-  );
-
-  const advanceNumber =
-    Math.min(
-      Math.max(Number(advance) || 0, 0),
-      total
-    );
-
-  const balance =
-    Math.max(0, total - advanceNumber);
-
-  /* =======================================================
-     FILTERED BILLS
-  ======================================================= */
-
-  const filteredBills = useMemo(() => {
-    const searchText =
-      search.trim().toLowerCase();
-
-    return bills.filter((bill) => {
-      const matchesSearch =
-        !searchText ||
-        bill.customerName
-          .toLowerCase()
-          .includes(searchText) ||
-        bill.item
-          .toLowerCase()
-          .includes(searchText) ||
-        bill.id
-          .toLowerCase()
-          .includes(searchText);
-
-      const matchesStatus =
-        statusFilter === "All" ||
-        bill.status === statusFilter;
+  const existingBillForSelectedOrder =
+    useMemo(() => {
+      if (!selectedOrderId) {
+        return null;
+      }
 
       return (
-        matchesSearch &&
-        matchesStatus
+        bills.find(
+          (bill) =>
+            String(bill.orderId) ===
+            String(selectedOrderId)
+        ) ?? null
       );
+    }, [
+      bills,
+      selectedOrderId,
+    ]);
+
+  const selectedBillPayments =
+    useMemo(() => {
+      if (!selectedBill) {
+        return [];
+      }
+
+      return payments.filter(
+        (payment) =>
+          String(payment.billId) ===
+          String(selectedBill.id)
+      );
+    }, [
+      payments,
+      selectedBill,
+    ]);
+
+  const filteredBills = useMemo(() => {
+    const query = search
+      .trim()
+      .toLowerCase();
+
+    return bills.filter((bill) => {
+      const matchesFilter =
+        filter === "All" ||
+        bill.status === filter;
+
+      if (!matchesFilter) {
+        return false;
+      }
+
+      if (!query) {
+        return true;
+      }
+
+      return [
+        bill.customerName,
+        bill.item,
+        bill.id,
+        bill.billNumber,
+        bill.orderId,
+      ]
+        .filter(Boolean)
+        .some((value) =>
+          String(value)
+            .toLowerCase()
+            .includes(query)
+        );
     });
-  }, [bills, search, statusFilter]);
+  }, [
+    bills,
+    search,
+    filter,
+  ]);
 
-  /* =======================================================
-     SUMMARY
-  ======================================================= */
-
-  const totalRevenue = bills.reduce(
-    (sum, bill) =>
-      sum + Number(bill.paidAmount || 0),
-    0
+  const totalRevenue = useMemo(
+    () =>
+      bills.reduce(
+        (sum, bill) =>
+          sum + Number(bill.total || 0),
+        0
+      ),
+    [bills]
   );
 
-  const totalOutstanding =
-    bills.reduce(
-      (sum, bill) =>
-        sum + Number(bill.balance || 0),
+  const totalPending = useMemo(
+    () =>
+      bills.reduce(
+        (sum, bill) =>
+          sum + Number(bill.balance || 0),
+        0
+      ),
+    [bills]
+  );
+
+  const paidBills = useMemo(
+    () =>
+      bills.filter(
+        (bill) =>
+          bill.status === "Paid"
+      ).length,
+    [bills]
+  );
+
+  const pendingBills = useMemo(
+    () =>
+      bills.filter(
+        (bill) =>
+          bill.balance > 0
+      ).length,
+    [bills]
+  );
+
+  const subtotal =
+    Number(quantity || 0) *
+    Number(price || 0);
+
+  const discountValue =
+    Number(discount || 0);
+
+  const taxValue =
+    Number(tax || 0);
+
+  const calculatedTotal = Math.max(
+    0,
+    subtotal -
+      discountValue +
+      taxValue
+  );
+
+  const advanceValue = Math.min(
+    Math.max(
+      Number(advance || 0),
       0
+    ),
+    calculatedTotal
+  );
+
+  const calculatedBalance =
+    Math.max(
+      0,
+      calculatedTotal -
+        advanceValue
     );
-
-  const paidBills = bills.filter(
-    (bill) => bill.status === "Paid"
-  ).length;
-
-  const pendingBills = bills.filter(
-    (bill) => bill.status !== "Paid"
-  ).length;
-
-  /* =======================================================
-     RESET FORM
-  ======================================================= */
 
   const resetCreateForm = () => {
     setSelectedCustomerId("");
@@ -639,29 +514,110 @@ export default function BillingScreen({
     setPrice("");
     setDiscount("0");
     setTax("0");
-    setAdvance("");
     setPaymentMethod("Cash");
+    setAdvance("0");
   };
 
-  /* =======================================================
-     CUSTOMER ORDERS
-  ======================================================= */
+  const openCreateModal = () => {
+    resetCreateForm();
+    setShowCreateModal(true);
+  };
 
-  const customerOrders = orders.filter(
-    (order) =>
-      order.customerId === selectedCustomerId
-  );
+  const openDetails = (bill: Bill) => {
+    setSelectedBill(bill);
+    setShowDetailsModal(true);
+  };
 
-  /* =======================================================
-     CREATE BILL
-  ======================================================= */
+  const openPaymentModal = (bill: Bill) => {
+    setSelectedBill(bill);
+    setPaymentAmount("");
+    setPaymentMethodForNewPayment(
+      "Cash"
+    );
+    setShowPaymentModal(true);
+  };
 
-  const handleCreateBillPress = () => {
+  /*
+   * FIX:
+   * Whenever a customer changes, reset the order
+   * and all order-dependent invoice fields.
+   */
+  const handleCustomerChange = (
+    customerId: string
+  ) => {
+    setSelectedCustomerId(customerId);
+    setSelectedOrderId("");
+    setItem("");
+    setPrice("");
+  };
 
+  /*
+   * FIX:
+   * When an order is selected, read common property
+   * names so the screen works with both camelCase
+   * and Supabase-style objects.
+   */
+  const handleOrderChange = (
+    orderId: string
+  ) => {
+    setSelectedOrderId(orderId);
+
+    const order: any = orders.find(
+      (item: any) =>
+        String(item.id) ===
+        String(orderId)
+    );
+
+    if (!order) {
+      return;
+    }
+
+    const orderItem =
+      order.item ??
+      order.itemName ??
+      order.productName ??
+      order.product ??
+      order.service ??
+      "";
+
+    const orderPrice =
+      order.price ??
+      order.amount ??
+      order.total ??
+      "";
+
+    setItem(String(orderItem));
+    setPrice(
+      orderPrice === ""
+        ? ""
+        : String(orderPrice)
+    );
+  };
+
+  const handleViewExistingInvoice = () => {
+    if (!existingBillForSelectedOrder) {
+      return;
+    }
+
+    setShowCreateModal(false);
+    openDetails(
+      existingBillForSelectedOrder
+    );
+  };
+
+  const handleCreateBill = () => {
     if (!selectedCustomerId) {
       Alert.alert(
-        "Select Customer",
+        "Customer Required",
         "Please select a customer."
+      );
+      return;
+    }
+
+    if (!selectedOrderId) {
+      Alert.alert(
+        "Order Required",
+        "Please select an order."
       );
       return;
     }
@@ -669,44 +625,31 @@ export default function BillingScreen({
     if (!item.trim()) {
       Alert.alert(
         "Item Required",
-        "Please enter the item name."
+        "Please enter the item."
       );
       return;
     }
 
-    if (quantityNumber <= 0) {
+    if (Number(quantity || 0) <= 0) {
       Alert.alert(
         "Invalid Quantity",
-        "Quantity must be greater than zero."
+        "Quantity must be greater than 0."
       );
       return;
     }
 
-    if (priceNumber <= 0) {
+    if (Number(price || 0) < 0) {
       Alert.alert(
         "Invalid Price",
-        "Please enter a valid price."
+        "Price cannot be negative."
       );
       return;
     }
 
-    if (discountNumber < 0) {
-      Alert.alert(
-        "Invalid Discount",
-        "Discount cannot be negative."
-      );
-      return;
-    }
-
-    if (taxNumber < 0) {
-      Alert.alert(
-        "Invalid Tax",
-        "Tax cannot be negative."
-      );
-      return;
-    }
-
-    if (discountNumber > subtotal) {
+    if (
+      Number(discount || 0) >
+      subtotal
+    ) {
       Alert.alert(
         "Invalid Discount",
         "Discount cannot be greater than subtotal."
@@ -714,17 +657,49 @@ export default function BillingScreen({
       return;
     }
 
-    if (total <= 0) {
+    if (advanceValue > calculatedTotal) {
       Alert.alert(
-        "Invalid Total",
-        "Bill total must be greater than zero."
+        "Invalid Payment",
+        "Advance cannot exceed total."
       );
       return;
     }
 
-    const customer = customers.find(
-      (c) => c.id === selectedCustomerId
-    );
+    if (
+      existingBillForSelectedOrder
+    ) {
+      Alert.alert(
+        "Invoice Already Exists",
+        "This order already has an invoice. Please use the existing invoice.",
+        [
+          {
+            text: "View Invoice",
+            onPress:
+              handleViewExistingInvoice,
+          },
+          {
+            text: "Cancel",
+            style: "cancel",
+          },
+        ]
+      );
+
+      return;
+    }
+
+    const customer =
+      customers.find(
+        (item) =>
+          String(item.id) ===
+          String(selectedCustomerId)
+      );
+
+    const order: any =
+      orders.find(
+        (item: any) =>
+          String(item.id) ===
+          String(selectedOrderId)
+      );
 
     if (!customer) {
       Alert.alert(
@@ -734,48 +709,97 @@ export default function BillingScreen({
       return;
     }
 
-    const billId = createId("BILL");
+    if (!order) {
+      Alert.alert(
+        "Order Not Found",
+        "Please select a valid order."
+      );
+      return;
+    }
 
-    const newBill: Bill = {
+    /*
+     * IMPORTANT:
+     * Keep BILL-xxxxxxxx as both id and billNumber.
+     * This guarantees the invoice number survives
+     * through creation and database mapping.
+     */
+    const billId = `BILL-${Date.now()
+      .toString()
+      .slice(-8)}`;
+
+    const bill: Bill = {
       id: billId,
-      orderId: selectedOrderId,
-      customerId: customer.id,
-      customerName: customer.name,
-      item: item.trim(),
-      quantity: quantityNumber,
-      price: priceNumber,
+      billNumber: billId,
+      orderId: order.id,
+      customerId:
+        selectedCustomerId,
+      customerName:
+        customer.name,
+      item: orderItems
+        .filter((i)=>i.amount)
+        .map((i)=>i.description)
+        .join(", "),
+
+      items:
+        orderItems
+          .filter((i)=>i.amount)
+          .map((i)=>({
+            description: i.description,
+            quantity: Number(i.quantity || 0),
+            amount: Number(i.amount || 0),
+          })),
+
+      quantity:
+        orderItems.reduce(
+          (sum,i)=>
+            sum + Number(i.quantity || 0),
+          0
+        ),
+
+      price:
+        orderItems.reduce(
+          (sum,i)=>
+            sum + Number(i.amount || 0),
+          0
+        ),
+
       subtotal,
-      discount: discountNumber,
-      tax: taxNumber,
-      total,
-      paidAmount: advanceNumber,
-      balance,
+      discount:
+        discountValue,
+      tax:
+        taxValue,
+      total:
+        calculatedTotal,
+      paidAmount:
+        advanceValue,
+      balance:
+        calculatedBalance,
       paymentMethod,
       status:
-        balance <= 0
-          ? "Paid"
-          : advanceNumber > 0
-          ? "Partially Paid"
-          : "Unpaid",
-      billDate: todayString(),
+        calculateStatus(
+          calculatedTotal,
+          advanceValue
+        ),
+      billDate:
+        today(),
     };
 
     let initialPayment:
       | Payment
       | undefined;
 
-    if (advanceNumber > 0) {
+    if (advanceValue > 0) {
       initialPayment = {
-        id: createId("PAY"),
-        billId,
-        amount: advanceNumber,
+        id: makeId("PAY"),
+        billId: billId,
+        amount: advanceValue,
         method: paymentMethod,
-        paymentDate: todayString(),
+        paymentDate: today(),
       };
     }
 
     onCreateBill(
-      newBill,
+      bill,
       initialPayment
     );
 
@@ -783,413 +807,558 @@ export default function BillingScreen({
     resetCreateForm();
 
     Alert.alert(
-      "Bill Created",
-      "The invoice has been created successfully."
+      "Invoice Created",
+      `${getInvoiceNumber(
+        bill
+      )} created successfully.`
     );
   };
 
-  /* =======================================================
-     OPEN BILL
-  ======================================================= */
+  const handleAddPayment = async () => {
+    if (!selectedBill) {
+      return;
+    }
 
-  const openBill = (bill: Bill) => {
-    setSelectedBill(bill);
-    setShowDetailsModal(true);
-  };
-
-  /* =======================================================
-     OPEN PAYMENT
-  ======================================================= */
-
-  const openPayment = (bill: Bill) => {
-    setSelectedBill(bill);
-    setPaymentAmount("");
-    setNewPaymentMethod("Cash");
-    setShowPaymentModal(true);
-  };
-
-  /* =======================================================
-     ADD PAYMENT
-  ======================================================= */
-
-  const handleAddPaymentPress = () => {
-
-    if (!selectedBill) return;
-
-    const amount =
-      Number(paymentAmount) || 0;
+    const amount = Number(paymentAmount || 0);
 
     if (amount <= 0) {
-      Alert.alert(
-        "Invalid Amount",
-        "Please enter a valid payment amount."
-      );
+      Alert.alert("Invalid Amount", "Enter a payment amount greater than 0.");
       return;
     }
 
-    if (amount > selectedBill.balance) {
-      Alert.alert(
-        "Amount Too High",
-        `Maximum payable balance is ${formatMoney(
-          selectedBill.balance
-        )}.`
-      );
+    if (amount > Number(selectedBill.balance || 0)) {
+      Alert.alert("Invalid Amount", "Payment cannot be greater than the outstanding balance.");
       return;
     }
 
-    const payment: Payment = {
-      id: createId("PAY"),
-      billId: selectedBill.id,
-      amount,
-      method: newPaymentMethod,
-      paymentDate: todayString(),
-    };
+    const newPaidAmount =
+      Number(selectedBill.paidAmount || 0) + amount;
 
-    const updatedPaidAmount =
-      selectedBill.paidAmount + amount;
-
-    const updatedBalance =
-      Math.max(
-        0,
-        selectedBill.total -
-          updatedPaidAmount
-      );
-
-    const updatedStatus: BillStatus =
-      updatedBalance <= 0
-        ? "Paid"
-        : updatedPaidAmount > 0
-        ? "Partially Paid"
-        : "Unpaid";
+    const newBalance = Math.max(
+      0,
+      Number(selectedBill.total || 0) - newPaidAmount
+    );
 
     const updatedBill: Bill = {
       ...selectedBill,
-      paidAmount: updatedPaidAmount,
-      balance: updatedBalance,
-      status: updatedStatus,
-      paymentMethod: newPaymentMethod,
+      paidAmount: newPaidAmount,
+      balance: newBalance,
+      status: calculateStatus(
+        Number(selectedBill.total || 0),
+        newPaidAmount
+      ),
     };
 
-    onAddPayment(payment);
-    onUpdateBill(updatedBill);
+    const payment: Payment = {
+      id: makeId("PAY"),
+      billId: selectedBill.id,
+      amount,
+      method: paymentMethodForNewPayment,
+      paymentDate: today(),
+    };
+
+    const saved = await onAddPayment(payment, updatedBill);
+
+    if (!saved) {
+      return;
+    }
 
     setSelectedBill(updatedBill);
+    setPaymentAmount("");
     setShowPaymentModal(false);
 
     Alert.alert(
-      "Payment Added",
-      `${formatMoney(amount)} payment recorded successfully.`
+      "Payment Recorded",
+      `${money(amount)} payment recorded successfully.`
     );
   };
 
-  /* =======================================================
-     SHARE RECEIPT
-  ======================================================= */
+  /*
+   * IMPORTANT RECEIPT FIX
+   *
+   * Before opening Receipt Preview, take the latest
+   * bill object from the current bills array.
+   *
+   * This prevents an old selectedBill object from
+   * showing blank invoice/customer/item/quantity.
+   */
+  const openReceipt = (bill: Bill) => {
+    const latestBill =
+      bills.find(
+        (item) =>
+          String(item.id) ===
+          String(bill.id)
+      ) ?? bill;
 
-  const handleShareReceipt = async () => {
+    setSelectedBill(
+      latestBill
+    );
 
-    if (!selectedBill) return;
-
-    try {
-      setReceiptBusy("share");
-
-      const message = `
-Femme Fatale Boutique
-Style Speaks Louder ♡
-
-Customer: ${selectedBill.customerName}
-Item: ${selectedBill.item}
-
-Total: ${formatMoney(selectedBill.total)}
-Paid: ${formatMoney(selectedBill.paidAmount)}
-Balance: ${formatMoney(selectedBill.balance)}
-`;
-
-      await Share.share({
-        message,
-        title: "Femme Fatale Invoice",
-      });
-
-    } catch (error) {
-      console.error(
-        "SHARE RECEIPT ERROR:",
-        error
-      );
-    } finally {
-      setReceiptBusy(null);
-    }
+    setShowDetailsModal(false);
+    setShowReceiptModal(true);
   };
 
-  /* =======================================================
-     PRINT RECEIPT
-  ======================================================= */
+  const buildReceiptHtml = (
+    bill: Bill
+  ) => {
+    const invoiceNumber =
+      getInvoiceNumber(bill);
+
+    const customerName =
+      bill.customerName || "-";
+
+    const billItem =
+      bill.item || "-";
+
+    const billQuantity =
+      String(
+        bill.quantity || 0
+      );
+
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    padding: 24px;
+    color: #242124;
+  }
+
+  .receipt {
+    max-width: 500px;
+    margin: auto;
+  }
+
+  .brand {
+    text-align: center;
+    color: #AD1457;
+    font-size: 30px;
+    font-weight: 800;
+  }
+
+  .boutique {
+    text-align: center;
+    color: #C69A3A;
+    font-size: 12px;
+    letter-spacing: 5px;
+    font-weight: bold;
+    margin-top: 5px;
+  }
+
+  .tagline {
+    text-align: center;
+    color: #81777D;
+    font-size: 12px;
+    font-style: italic;
+    margin-top: 7px;
+  }
+
+  .divider {
+    border-top: 1px solid #E9DDE2;
+    margin: 20px 0;
+  }
+
+  .info {
+    font-size: 13px;
+    margin-bottom: 8px;
+  }
+
+  .row {
+    display: flex;
+    justify-content: space-between;
+    padding: 7px 0;
+    font-size: 13px;
+  }
+
+  .total {
+    color: #AD1457;
+    font-size: 17px;
+    font-weight: 800;
+  }
+
+  .balance {
+    color: #C43D4B;
+    font-size: 15px;
+    font-weight: 800;
+  }
+
+  .footer {
+    text-align: center;
+    color: #81777D;
+    font-size: 12px;
+    margin-top: 30px;
+  }
+
+  .footer-brand {
+    color: #AD1457;
+    font-weight: 800;
+    font-size: 14px;
+    margin-top: 4px;
+  }
+</style>
+</head>
+
+<body>
+<div class="receipt">
+
+ <div class="brand">
+  Femme Fatale <b>BOUTIQUE</b>
+</div>
+
+<div class="subtitle">
+  FASHION DESIGN WEAR & GARMENTS
+</div>
+
+<div class="tagline">
+  Style Speaks Louder â™¡
+</div>
+
+  <div class="divider"></div>
+
+  <div class="info">
+    <strong>Bill:</strong>
+${invoiceNumber}
+  </div>
+
+  <div class="info">
+    <strong>Customer:</strong>
+    ${customerName}
+  </div>
+
+  <div class="info">
+    <strong>Item:</strong>
+    ${billItem}
+  </div>
+
+  <div class="info">
+    <strong>Quantity:</strong>
+    ${billQuantity}
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="row">
+    <span>Subtotal</span>
+    <span>${money(
+      bill.subtotal
+    )}</span>
+  </div>
+
+  <div class="row">
+    <span>Discount</span>
+    <span>-${money(
+      bill.discount
+    )}</span>
+  </div>
+
+
+  <div class="row total">
+    <span>Total</span>
+    <span>${money(
+      bill.total
+    )}</span>
+  </div>
+
+  <div class="row">
+    <span>Paid</span>
+    <span>${money(
+      bill.paidAmount
+    )}</span>
+  </div>
+
+  <div class="row balance">
+    <span>Balance</span>
+    <span>${money(
+      bill.balance
+    )}</span>
+  </div>
+
+  <div class="divider"></div>
+
+ <div class="footer">
+
+  <div>
+    * This bill is valid up to 30 days only.
+  </div>
+
+  <div class="footer-brand">
+    Thank you for choosing Femme Fatale Boutique
+  </div>
+
+  <div>
+    Shop No. 27, VMRDA Complex,
+    Udyog Bhavan Complex,
+    Siripuram Junction,
+    Visakhapatnam - 530003,
+    Andhra Pradesh.
+  </div>
+
+</div>
+
+</div>
+</body>
+</html>
+`;
+  };
 
   const handlePrintReceipt = async () => {
-
-    if (!selectedBill) return;
+    if (!selectedBill) {
+      return;
+    }
 
     try {
       setReceiptBusy("print");
 
-      const html = buildReceiptHtml(
-        selectedBill,
-        payments
-      );
+      const html =
+        buildReceiptHtml(
+          selectedBill
+        );
 
       await Print.printAsync({
         html,
       });
-
     } catch (error) {
-
       console.error(
         "PRINT RECEIPT ERROR:",
         error
       );
 
       Alert.alert(
-        "Print Failed",
+        "Print Error",
         "Unable to open the print screen."
       );
-
     } finally {
       setReceiptBusy(null);
     }
   };
 
-  /* =======================================================
-     EXPORT PDF
-     
-     Expo Go Android compatible implementation.
-     
-     printToFileAsync() creates a PDF inside Expo Go's
-     protected sandbox. Expo Go cannot reliably copy/share
-     that URI using expo-file-system.
-     
-     Therefore we directly open the native print screen.
-     
-     User can choose:
-     
-     Print screen
-        ↓
-     Save as PDF
-        ↓
-     Save
-     
-  ======================================================= */
-
-  const handleExportReceipt = async () => {
-
-    if (!selectedBill) return;
+  const handleShareReceipt = async () => {
+    if (!selectedBill) {
+      return;
+    }
 
     try {
+      setReceiptBusy("share");
 
-      setReceiptBusy("export");
+      const invoiceNumber =
+        getInvoiceNumber(
+          selectedBill
+        );
 
-      const html = buildReceiptHtml(
-        selectedBill,
-        payments
-      );
+      const message = `
+Femme Fatale Boutique
 
-      console.log(
-        "OPENING PDF EXPORT..."
-      );
+Invoice: ${invoiceNumber}
+Customer: ${
+        selectedBill.customerName ||
+        "-"
+      }
+Item: ${
+        selectedBill.item ||
+        "-"
+      }
+Quantity: ${String(
+        selectedBill.quantity || 0
+      )}
 
-      await Print.printAsync({
-        html,
+Subtotal: ${money(
+        selectedBill.subtotal
+      )}
+Discount: -${money(
+        selectedBill.discount
+      )}
+Tax: ${money(
+        selectedBill.tax
+      )}
+Total: ${money(
+        selectedBill.total
+      )}
+Paid: ${money(
+        selectedBill.paidAmount
+      )}
+Balance: ${money(
+        selectedBill.balance
+      )}
+
+Thank you for choosing Femme Fatale Boutique
+`;
+
+      await Share.share({
+        message:
+          message.trim(),
+        title:
+          `Receipt ${invoiceNumber}`,
       });
-
-      console.log(
-        "PDF PRINT SCREEN OPENED"
-      );
-
     } catch (error) {
-
       console.error(
-        "EXPORT PDF ERROR:",
+        "SHARE RECEIPT ERROR:",
         error
       );
 
       Alert.alert(
-        "Export Failed",
-        "Unable to open the PDF export screen. Please try again."
+        "Share Error",
+        "Unable to share the receipt."
       );
-
     } finally {
-
       setReceiptBusy(null);
-
     }
   };
-
-  /* =======================================================
-     STATUS COLOR
-  ======================================================= */
-
-  const getStatusColor = (
-    status: BillStatus
-  ) => {
-
-    if (status === "Paid") {
-      return colors.Green;
-    }
-
-    if (status === "Partially Paid") {
-      return colors.Orange;
-    }
-
-    return colors.Red;
-  };
-
-  /* =======================================================
-     RENDER
-  ======================================================= */
 
   return (
-    <View style={styles.container}>
-
-      {/* HEADER */}
-
-      <View style={styles.header}>
-
-        <TouchableOpacity
-          style={styles.backButton}
-          onPress={onBack}
-        >
-          <Text style={styles.backText}>
-            ‹
-          </Text>
-        </TouchableOpacity>
-
-        <View style={styles.headerCenter}>
-
-          <Text style={styles.brandText}>
-            Femme Fatale
-          </Text>
-
-          <Text style={styles.headerTitle}>
-            Billing
-          </Text>
-
-        </View>
-
-        <TouchableOpacity
-          style={styles.addButton}
-          onPress={() => {
-            resetCreateForm();
-            setShowCreateModal(true);
-          }}
-        >
-          <Text style={styles.addButtonText}>
-            +
-          </Text>
-        </TouchableOpacity>
-
-      </View>
-
-      {/* CONTENT */}
-
+    <View
+      style={
+        styles.container
+      }
+    >
       <ScrollView
-        style={styles.scroll}
+        showsVerticalScrollIndicator={
+          false
+        }
         contentContainerStyle={
           styles.scrollContent
         }
-        keyboardShouldPersistTaps="handled"
       >
+        {/* =====================================================
+            HEADER
+        ===================================================== */}
 
-        {/* BRAND CARD */}
+        <View
+          style={
+            styles.header
+          }
+        >
+          <TouchableOpacity
+            style={
+              styles.backButton
+            }
+            onPress={onBack}
+          >
+            <MaterialCommunityIcons name="chevron-left" size={30} color="#AD1457" />
+          </TouchableOpacity>
 
-        <View style={styles.brandCard}>
-
-          <Text style={styles.brandCardTitle}>
-            Femme Fatale Boutique
-          </Text>
-
-          <Text style={styles.brandCardSubtitle}>
-            Style Speaks Louder ♡
-          </Text>
-
-        </View>
-
-        {/* SUMMARY */}
-
-        <View style={styles.summaryGrid}>
-
-          <View style={styles.summaryCard}>
-
-            <Text style={styles.summaryLabel}>
-              Revenue
-            </Text>
-
-            <Text style={styles.summaryValue}>
-              {formatMoney(totalRevenue)}
-            </Text>
-
-          </View>
-
-          <View style={styles.summaryCard}>
-
-            <Text style={styles.summaryLabel}>
-              Outstanding
+          <View
+            style={
+              styles.headerTextArea
+            }
+          >
+            <Text
+              style={
+                styles.title
+              }
+            >
+              Billing
             </Text>
 
             <Text
-              style={[
-                styles.summaryValue,
-                {
-                  color: colors.Magenta,
-                },
-              ]}
+              style={
+                styles.subtitle
+              }
             >
-              {formatMoney(totalOutstanding)}
+              Manage invoices & boutique payments
             </Text>
-
           </View>
 
-          <View style={styles.summaryCard}>
-
-            <Text style={styles.summaryLabel}>
-              Paid Bills
+          <TouchableOpacity
+            style={
+              styles.addButton
+            }
+            onPress={
+              openCreateModal
+            }
+          >
+            <Text
+              style={
+                styles.addButtonText
+              }
+            >
+              + BILL
             </Text>
-
-            <Text style={styles.summaryValue}>
-              {paidBills}
-            </Text>
-
-          </View>
-
-          <View style={styles.summaryCard}>
-
-            <Text style={styles.summaryLabel}>
-              Pending
-            </Text>
-
-            <Text style={styles.summaryValue}>
-              {pendingBills}
-            </Text>
-
-          </View>
-
+          </TouchableOpacity>
         </View>
 
-        {/* SEARCH */}
+        {/* =====================================================
+            SUMMARY
+        ===================================================== */}
 
-        <TextInput
-          value={search}
-          onChangeText={setSearch}
-          placeholder="Search customer, item or bill..."
-          placeholderTextColor="#999"
-          style={styles.searchInput}
-        />
+        <View
+          style={
+            styles.summaryGrid
+          }
+        >
+          <SummaryCard
+            title="Total Revenue"
+            value={money(
+              totalRevenue
+            )}
+            icon="currency-inr"
+          />
 
-        {/* FILTERS */}
+          <SummaryCard
+            title="Pending Amount"
+            value={money(
+              totalPending
+            )}
+            icon="alert-circle-outline"
+          />
+
+          <SummaryCard
+            title="Paid Invoices"
+            value={String(
+              paidBills
+            )}
+            icon="check-circle-outline"
+          />
+
+          <SummaryCard
+            title="Pending Invoices"
+            value={String(
+              pendingBills
+            )}
+            icon="clock-outline"
+          />
+        </View>
+
+        {/* =====================================================
+            SEARCH
+        ===================================================== */}
+
+        <View
+          style={
+            styles.searchContainer
+          }
+        >
+          <MaterialCommunityIcons name="magnify" size={23} color="#AD1457" style={{ marginRight: 7 }} />
+
+          <TextInput
+            value={search}
+            onChangeText={
+              setSearch
+            }
+            placeholder="Search invoice, customer or item..."
+            placeholderTextColor="#A59BA0"
+            style={
+              styles.searchInput
+            }
+          />
+        </View>
+
+        {/* =====================================================
+            FILTERS
+        ===================================================== */}
 
         <ScrollView
           horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.filterScroll}
+          showsHorizontalScrollIndicator={
+            false
+          }
+          contentContainerStyle={
+            styles.filterRow
+          }
         >
-
           {(
             [
               "All",
@@ -1197,319 +1366,181 @@ Balance: ${formatMoney(selectedBill.balance)}
               "Partially Paid",
               "Paid",
             ] as const
-          ).map((status) => {
-
-            const active =
-              statusFilter === status;
-
-            return (
+          ).map(
+            (status) => (
               <TouchableOpacity
                 key={status}
                 style={[
-                  styles.filterButton,
-                  active &&
-                    styles.filterButtonActive,
+                  styles.filterChip,
+                  filter ===
+                    status &&
+                    styles.filterChipActive,
                 ]}
                 onPress={() =>
-                  setStatusFilter(status)
+                  setFilter(
+                    status
+                  )
                 }
               >
-
                 <Text
                   style={[
                     styles.filterText,
-                    active &&
+                    filter ===
+                      status &&
                       styles.filterTextActive,
                   ]}
                 >
                   {status}
                 </Text>
-
               </TouchableOpacity>
-            );
-          })}
-
+            )
+          )}
         </ScrollView>
 
-        {/* BILL LIST */}
+        {/* =====================================================
+            BILL SECTION
+        ===================================================== */}
 
-        {filteredBills.length === 0 ? (
-
-          <View style={styles.emptyCard}>
-
-            <Text style={styles.emptyIcon}>
-              ₹
-            </Text>
-
-            <Text style={styles.emptyTitle}>
-              No Bills Found
-            </Text>
-
-            <Text style={styles.emptyText}>
-              Create your first invoice using
-              the + button above.
-            </Text>
-
-            <TouchableOpacity
-              style={styles.primaryButton}
-              onPress={() => {
-                resetCreateForm();
-                setShowCreateModal(true);
-              }}
+        <View
+          style={
+            styles.sectionHeader
+          }
+        >
+          <View>
+            <Text
+              style={
+                styles.sectionTitle
+              }
             >
+              Invoices
+            </Text>
 
-              <Text
-                style={
-                  styles.primaryButtonText
-                }
-              >
-                Create Bill
-              </Text>
-
-            </TouchableOpacity>
-
+            <Text
+              style={
+                styles.sectionSubtitle
+              }
+            >
+              {filteredBills.length} invoice
+              {filteredBills.length ===
+              1
+                ? ""
+                : "s"} found
+            </Text>
           </View>
 
+          {pendingBills > 0 && (
+            <Text
+              style={
+                styles.pendingText
+              }
+            >
+              {pendingBills} pending
+            </Text>
+          )}
+        </View>
+
+        {filteredBills.length ===
+        0 ? (
+          <EmptyState
+            onCreate={
+              openCreateModal
+            }
+          />
         ) : (
-
-          filteredBills.map((bill) => {
-
-            const statusColor =
-              getStatusColor(
-                bill.status
-              );
-
-            return (
-              <TouchableOpacity
-                key={bill.id}
-                style={styles.billCard}
-                onPress={() =>
-                  openBill(bill)
+          filteredBills.map(
+            (bill) => (
+              <BillCard
+                key={
+                  bill.id
                 }
-                activeOpacity={0.85}
-              >
-
-                <View
-                  style={
-                    styles.billTopRow
-                  }
-                >
-
-                  <View
-                    style={
-                      styles.billCustomerSection
-                    }
-                  >
-
-                    <Text
-                      style={
-                        styles.billCustomer
-                      }
-                    >
-                      {bill.customerName}
-                    </Text>
-
-                    <Text
-                      style={
-                        styles.billItem
-                      }
-                    >
-                      {bill.item}
-                    </Text>
-
-                  </View>
-
-                  <View
-                    style={[
-                      styles.statusBadge,
-                      {
-                        backgroundColor:
-                          `${statusColor}18`,
-                      },
-                    ]}
-                  >
-
-                    <Text
-                      style={[
-                        styles.statusText,
-                        {
-                          color:
-                            statusColor,
-                        },
-                      ]}
-                    >
-                      {bill.status}
-                    </Text>
-
-                  </View>
-
-                </View>
-
-                <View
-                  style={
-                    styles.billDivider
-                  }
-                />
-
-                <View
-                  style={
-                    styles.billInfoRow
-                  }
-                >
-
-                  <View>
-
-                    <Text
-                      style={
-                        styles.infoLabel
-                      }
-                    >
-                      Total
-                    </Text>
-
-                    <Text
-                      style={
-                        styles.infoValue
-                      }
-                    >
-                      {formatMoney(
-                        bill.total
-                      )}
-                    </Text>
-
-                  </View>
-
-                  <View>
-
-                    <Text
-                      style={
-                        styles.infoLabel
-                      }
-                    >
-                      Paid
-                    </Text>
-
-                    <Text
-                      style={[
-                        styles.infoValue,
-                        {
-                          color:
-                            colors.Green,
-                        },
-                      ]}
-                    >
-                      {formatMoney(
-                        bill.paidAmount
-                      )}
-                    </Text>
-
-                  </View>
-
-                  <View>
-
-                    <Text
-                      style={
-                        styles.infoLabel
-                      }
-                    >
-                      Due
-                    </Text>
-
-                    <Text
-                      style={[
-                        styles.infoValue,
-                        {
-                          color:
-                            bill.balance >
-                            0
-                              ? colors.Magenta
-                              : colors.Green,
-                        },
-                      ]}
-                    >
-                      {formatMoney(
-                        bill.balance
-                      )}
-                    </Text>
-
-                  </View>
-
-                </View>
-
-                <Text
-                  style={
-                    styles.billDate
-                  }
-                >
-                  {formatDate(
-                    bill.billDate
-                  )}
-                </Text>
-
-              </TouchableOpacity>
-            );
-          })
-
+                bill={
+                  bill
+                }
+                onPress={() =>
+                  openDetails(
+                    bill
+                  )
+                }
+                onPayment={() =>
+                  openPaymentModal(
+                    bill
+                  )
+                }
+              />
+            )
+          )
         )}
-
       </ScrollView>
 
-      {/* =================================================
-          CREATE BILL MODAL
-      ================================================= */}
+      {/* =====================================================
+          Create Bill MODAL
+      ===================================================== */}
 
       <Modal
-        visible={showCreateModal}
+        visible={
+          showCreateModal
+        }
         animationType="slide"
         transparent
         onRequestClose={() =>
-          setShowCreateModal(false)
+          setShowCreateModal(
+            false
+          )
         }
       >
-
-        <View style={styles.modalOverlay}>
-
-          <View style={styles.modalCard}>
-
+        <View
+          style={
+            styles.modalOverlay
+          }
+        >
+          <View
+            style={
+              styles.modalCard
+            }
+          >
             <View
               style={
                 styles.modalHeader
               }
             >
-
-              <Text
-                style={
-                  styles.modalTitle
-                }
-              >
-                Create Bill
-              </Text>
-
-              <TouchableOpacity
-                onPress={() =>
-                  setShowCreateModal(false)
-                }
-              >
+              <View>
+                <Text
+                  style={
+                    styles.modalTitle
+                  }
+                >
+                  Create Bill
+                </Text>
 
                 <Text
                   style={
-                    styles.closeButton
+                    styles.modalSubtitle
                   }
                 >
-                  ×
+                  Create a new boutique bill
                 </Text>
+              </View>
 
+              <TouchableOpacity
+                onPress={() =>
+                  setShowCreateModal(
+                    false
+                  )
+                }
+              >
+                <MaterialCommunityIcons
+  name="close"
+  size={24}
+  color="#AD1457"
+/>
               </TouchableOpacity>
-
             </View>
 
             <ScrollView
-              showsVerticalScrollIndicator={false}
-              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={
+                false
+              }
             >
-
-              {/* CUSTOMER */}
-
               <Text
                 style={
                   styles.fieldLabel
@@ -1523,64 +1554,53 @@ Balance: ${formatMoney(selectedBill.balance)}
                 showsHorizontalScrollIndicator={
                   false
                 }
-                style={
-                  styles.customerSelector
+                contentContainerStyle={
+                  styles.chipList
                 }
               >
-
-                {customers.map(
-                  (customer) => {
-
-                    const active =
-                      selectedCustomerId ===
-                      customer.id;
-
-                    return (
-                      <TouchableOpacity
-                        key={
-                          customer.id
-                        }
-                        style={[
-                          styles.customerChip,
-                          active &&
-                            styles.customerChipActive,
-                        ]}
-                        onPress={() => {
-                          setSelectedCustomerId(
+                {customers.filter((customer) => customer.name?.trim()).map(
+                  (customer) => (
+                    <TouchableOpacity
+                      key={
+                        customer.id
+                      }
+                      style={[
+                        styles.choiceChip,
+                        selectedCustomerId ===
+                          String(
                             customer.id
-                          );
-
-                          setSelectedOrderId(
-                            ""
-                          );
-                        }}
+                          ) &&
+                          styles.choiceChipActive,
+                      ]}
+                      onPress={() =>
+                        handleCustomerChange(
+                          String(
+                            customer.id
+                          )
+                        )
+                      }
+                    >
+                      <Text
+                        style={[
+                          styles.choiceChipText,
+                          selectedCustomerId ===
+                            String(
+                              customer.id
+                            ) &&
+                            styles.choiceChipTextActive,
+                        ]}
                       >
-
-                        <Text
-                          style={[
-                            styles.customerChipText,
-                            active &&
-                              styles.customerChipTextActive,
-                          ]}
-                        >
-                          {customer.name}
-                        </Text>
-
-                      </TouchableOpacity>
-                    );
-                  }
+                        {
+                          customer.name
+                        }
+                      </Text>
+                    </TouchableOpacity>
+                  )
                 )}
-
               </ScrollView>
 
-              {/* ORDER */}
-
-              {selectedCustomerId &&
-                customerOrders.length >
-                  0 && (
-
+              {selectedCustomerId && (
                 <>
-
                   <Text
                     style={
                       styles.fieldLabel
@@ -1589,201 +1609,361 @@ Balance: ${formatMoney(selectedBill.balance)}
                     Order
                   </Text>
 
-                  <ScrollView
-                    horizontal
-                    showsHorizontalScrollIndicator={
-                      false
-                    }
-                  >
-
-                    {customerOrders.map(
-                      (order) => {
-
-                        const active =
-                          selectedOrderId ===
-                          order.id;
-
-                        return (
-                          <TouchableOpacity
-                            key={order.id}
-                            style={[
-                              styles.customerChip,
-                              active &&
-                                styles.customerChipActive,
-                            ]}
-                            onPress={() => {
-
-                              setSelectedOrderId(
-                                order.id
-                              );
-
-                              setItem(
-                                order.item
-                              );
-
-                              setQuantity(
-                                String(
-                                  order.quantity ||
-                                    1
-                                )
-                              );
-
-                              setPrice(
-                                String(
-                                  order.price ||
-                                    ""
-                                )
-                              );
-
-                            }}
-                          >
-
-                            <Text
-                              style={[
-                                styles.customerChipText,
-                                active &&
-                                  styles.customerChipTextActive,
-                              ]}
-                            >
-                              {order.item}
-                            </Text>
-
-                          </TouchableOpacity>
-                        );
+                  {customerOrders.length ===
+                  0 ? (
+                    <Text
+                      style={
+                        styles.emptyHistory
                       }
-                    )}
+                    >
+                      No orders found for this customer.
+                    </Text>
+                  ) : (
+                    <ScrollView
+                      horizontal
+                      showsHorizontalScrollIndicator={
+                        false
+                      }
+                      contentContainerStyle={
+                        styles.chipList
+                      }
+                    >
+                      {customerOrders.map(
+                        (
+                          order: any
+                        ) => {
+                          const alreadyBilled =
+                            bills.some(
+                              (
+                                bill
+                              ) =>
+                                String(
+                                  bill.orderId
+                                ) ===
+                                String(
+                                  order.id
+                                )
+                            );
 
-                  </ScrollView>
-
+                          return (
+                            <TouchableOpacity
+                              key={
+                                order.id
+                              }
+                              style={[
+                                styles.choiceChip,
+                                selectedOrderId ===
+                                  String(
+                                    order.id
+                                  ) &&
+                                  styles.choiceChipActive,
+                                alreadyBilled &&
+                                  styles.choiceChipBilled,
+                              ]}
+                              onPress={() =>
+                                handleOrderChange(
+                                  String(
+                                    order.id
+                                  )
+                                )
+                              }
+                            >
+                              <Text
+                                style={[
+                                  styles.choiceChipText,
+                                  selectedOrderId ===
+                                    String(
+                                      order.id
+                                    ) &&
+                                    styles.choiceChipTextActive,
+                                ]}
+                              >
+                                {String(
+                                  order.orderNumber ??
+                                    order.id
+                                )}
+                                {alreadyBilled
+                                  ? "| Billed"
+                                  : ""}
+                              </Text>
+                            </TouchableOpacity>
+                          );
+                        }
+                      )}
+                    </ScrollView>
+                  )}
                 </>
               )}
 
-              {/* ITEM */}
+              {existingBillForSelectedOrder && (
+                <View
+                  style={
+                    styles.existingBillWarning
+                  }
+                >
+                  <Text
+                    style={
+                      styles.existingBillWarningTitle
+                    }
+                  >
+                    Invoice already exists
+                  </Text>
 
-              <Text
-                style={
-                  styles.fieldLabel
-                }
-              >
-                Item
-              </Text>
+                  <Text
+                    style={
+                      styles.existingBillWarningText
+                    }
+                  >
+                    This order already has an invoice.
+                  </Text>
 
-              <TextInput
-                value={item}
-                onChangeText={setItem}
-                placeholder="e.g. Blouse"
-                placeholderTextColor="#999"
-                style={
-                  styles.textInput
-                }
-              />
+                  <Text
+                    style={
+                      styles.existingBillNumber
+                    }
+                  >
+                    {getInvoiceNumber(
+                      existingBillForSelectedOrder
+                    )}
+                  </Text>
 
-              {/* QUANTITY */}
+                  <Text
+                    style={
+                      styles.existingBillAmount
+                    }
+                  >
+                    Total:{" "}
+                    {money(
+                      existingBillForSelectedOrder.total
+                    )}
+                  </Text>
 
-              <Text
-                style={
-                  styles.fieldLabel
-                }
-              >
-                Quantity
-              </Text>
+                  <TouchableOpacity
+                    style={
+                      styles.viewExistingButton
+                    }
+                    onPress={
+                      handleViewExistingInvoice
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.viewExistingButtonText
+                      }
+                    >
+                      View Existing Invoice
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              )}
 
-              <TextInput
-                value={quantity}
-                onChangeText={setQuantity}
-                keyboardType="numeric"
-                placeholder="1"
-                placeholderTextColor="#999"
-                style={
-                  styles.textInput
-                }
-              />
+              
+<Field
+  label="Mobile Number"
+  value={mobileNumber}
+  onChangeText={setMobileNumber}
+  placeholder="9876543210"
+  keyboardType="numeric"
+/>
 
-              {/* RATE */}
 
-              <Text
-                style={
-                  styles.fieldLabel
-                }
-              >
-                Rate
-              </Text>
+<Field
+  label="Due Date"
+  value={dueDate}
+  onChangeText={setDueDate}
+  placeholder="DD-MM-YYYY"
+/>
 
-              <TextInput
-                value={price}
-                onChangeText={setPrice}
-                keyboardType="numeric"
-                placeholder="₹0"
-                placeholderTextColor="#999"
-                style={
-                  styles.textInput
-                }
-              />
 
-              {/* DISCOUNT */}
+<Text
+  style={styles.fieldLabel}
+>
+  Order Status
+</Text>
 
-              <Text
-                style={
-                  styles.fieldLabel
-                }
-              >
-                Discount
-              </Text>
 
-              <TextInput
-                value={discount}
-                onChangeText={setDiscount}
-                keyboardType="numeric"
-                placeholder="₹0"
-                placeholderTextColor="#999"
-                style={
-                  styles.textInput
-                }
-              />
+<View style={styles.statusRow}>
 
-              {/* TAX */}
+{
+[
+"New",
+"Cutting",
+"Delivered"
+].map((status)=>(
+<TouchableOpacity
+ key={status}
+ style={[
+ styles.choiceChip,
+ orderStatus===status &&
+ styles.choiceChipActive
+ ]}
+ onPress={()=>
+ setOrderStatus(status)
+ }
+>
 
-              <Text
-                style={
-                  styles.fieldLabel
-                }
-              >
-                Tax
-              </Text>
+<Text
+style={[
+styles.choiceChipText,
+orderStatus===status &&
+styles.choiceChipTextActive
+]}
+>
+{status}
+</Text>
 
-              <TextInput
-                value={tax}
-                onChangeText={setTax}
-                keyboardType="numeric"
-                placeholder="₹0"
-                placeholderTextColor="#999"
-                style={
-                  styles.textInput
-                }
-              />
+</TouchableOpacity>
+))
+}
 
-              {/* ADVANCE */}
+</View>
 
-              <Text
-                style={
-                  styles.fieldLabel
-                }
-              >
-                Advance Payment
-              </Text>
+<Text
+  style={styles.fieldLabel}
+>
+  Items
+</Text>
 
-              <TextInput
-                value={advance}
-                onChangeText={setAdvance}
-                keyboardType="numeric"
-                placeholder="₹0"
-                placeholderTextColor="#999"
-                style={
-                  styles.textInput
-                }
-              />
 
-              {/* PAYMENT METHOD */}
+{
+orderItems.map((orderItem,index)=>(
+<View
+key={index}
+style={styles.itemCard}
+>
+
+<Field
+label="Item Name"
+value={orderItem.description}
+onChangeText={(value)=>
+setOrderItems(prev=>
+prev.map((item,i)=>
+i===index
+? {...item,description:value}
+:item
+)
+)
+}
+placeholder="Dress, Blouse, Saree..."
+/>
+
+
+<View
+style={styles.twoColumn}
+>
+
+<View
+style={styles.column}
+>
+
+<Field
+label="Quantity"
+value={String(orderItem.quantity)}
+onChangeText={(value)=>
+setOrderItems(prev=>
+prev.map((item,i)=>
+i===index
+? {
+...item,
+quantity:Number(value || 1)
+}
+:item
+)
+)
+}
+placeholder="1"
+keyboardType="numeric"
+/>
+
+</View>
+
+
+<View
+style={styles.column}
+>
+
+<Field
+label="Amount"
+value={orderItem.amount}
+onChangeText={(value)=>
+setOrderItems(prev=>
+prev.map((item,i)=>
+i===index
+? {
+...item,
+amount:value
+}
+:item
+)
+)
+}
+placeholder="0"
+keyboardType="numeric"
+/>
+
+</View>
+
+</View>
+
+
+<TouchableOpacity
+onPress={()=>
+setOrderItems(prev=>
+prev.filter((_,i)=>i!==index)
+)
+}
+>
+<Text>
+Remove Item
+</Text>
+</TouchableOpacity>
+
+
+</View>
+))
+}
+
+
+<TouchableOpacity
+style={styles.primaryButton}
+onPress={()=>
+setOrderItems(prev=>[
+...prev,
+{
+description:"",
+quantity:1,
+amount:""
+}
+])
+}
+>
+<Text style={styles.primaryButtonText}>
++ Add Item
+</Text>
+</TouchableOpacity>
+
+
+<View
+style={styles.twoColumn}
+>
+                <View
+                  style={
+                    styles.column
+                  }
+                >
+                  <Field
+                    label="Discount"
+                    value={
+                      discount
+                    }
+                    onChangeText={
+                      setDiscount
+                    }
+                    placeholder="0"
+                    keyboardType="numeric"
+                  />
+                </View>
+</View>
 
               <Text
                 style={
@@ -1793,187 +1973,85 @@ Balance: ${formatMoney(selectedBill.balance)}
                 Payment Method
               </Text>
 
-              <View
-                style={
-                  styles.paymentMethods
+              <PaymentMethods
+                selected={
+                  paymentMethod
                 }
-              >
+                onSelect={
+                  setPaymentMethod
+                }
+              />
 
-                {(
-                  [
-                    "Cash",
-                    "UPI",
-                    "Card",
-                    "Other",
-                  ] as PaymentMethod[]
-                ).map((method) => {
-
-                  const active =
-                    paymentMethod ===
-                    method;
-
-                  return (
-                    <TouchableOpacity
-                      key={method}
-                      style={[
-                        styles.paymentMethodButton,
-                        active &&
-                          styles.paymentMethodActive,
-                      ]}
-                      onPress={() =>
-                        setPaymentMethod(
-                          method
-                        )
-                      }
-                    >
-
-                      <Text
-                        style={[
-                          styles.paymentMethodText,
-                          active &&
-                            styles.paymentMethodTextActive,
-                        ]}
-                      >
-                        {method}
-                      </Text>
-
-                    </TouchableOpacity>
-                  );
-                })}
-
-              </View>
-
-              {/* CALCULATION */}
+              <Field
+                label="Advance Payment"
+                value={
+                  advance
+                }
+                onChangeText={
+                  setAdvance
+                }
+                placeholder="0"
+                keyboardType="numeric"
+              />
 
               <View
                 style={
                   styles.calculationCard
                 }
               >
+                <CalculationRow
+                  label="Subtotal"
+                  value={money(
+                    subtotal
+                  )}
+                />
+
+                <CalculationRow
+                  label="Discount"
+                  value={`-${money(
+                    discountValue
+                  )}`}
+                />
+
+                <CalculationRow
+                  label="Tax"
+                  value={money(
+                    taxValue
+                  )}
+                />
 
                 <View
                   style={
-                    styles.calculationRow
+                    styles.calculationDivider
                   }
-                >
-                  <Text>
-                    Subtotal
-                  </Text>
+                />
 
-                  <Text>
-                    {formatMoney(
-                      subtotal
-                    )}
-                  </Text>
-                </View>
+                <CalculationRow
+                  label="Total"
+                  value={money(
+                    calculatedTotal
+                  )}
+                  strong
+                />
 
-                <View
-                  style={
-                    styles.calculationRow
+                <CalculationRow
+                  label="Advance"
+                  value={money(
+                    advanceValue
+                  )}
+                />
+
+                <CalculationRow
+                  label="Balance"
+                  value={money(
+                    calculatedBalance
+                  )}
+                  strong
+                  danger={
+                    calculatedBalance >
+                    0
                   }
-                >
-                  <Text>
-                    Discount
-                  </Text>
-
-                  <Text>
-                    - {formatMoney(
-                      discountNumber
-                    )}
-                  </Text>
-                </View>
-
-                <View
-                  style={
-                    styles.calculationRow
-                  }
-                >
-                  <Text>
-                    Tax
-                  </Text>
-
-                  <Text>
-                    {formatMoney(
-                      taxNumber
-                    )}
-                  </Text>
-                </View>
-
-                <View
-                  style={[
-                    styles.calculationRow,
-                    styles.calculationTotal,
-                  ]}
-                >
-
-                  <Text
-                    style={
-                      styles.calculationTotalText
-                    }
-                  >
-                    Total
-                  </Text>
-
-                  <Text
-                    style={
-                      styles.calculationTotalText
-                    }
-                  >
-                    {formatMoney(
-                      total
-                    )}
-                  </Text>
-
-                </View>
-
-                <View
-                  style={
-                    styles.calculationRow
-                  }
-                >
-                  <Text>
-                    Advance
-                  </Text>
-
-                  <Text>
-                    {formatMoney(
-                      advanceNumber
-                    )}
-                  </Text>
-                </View>
-
-                <View
-                  style={
-                    styles.calculationRow
-                  }
-                >
-
-                  <Text
-                    style={{
-                      color:
-                        colors.Magenta,
-                      fontWeight:
-                        "700",
-                    }}
-                  >
-                    Balance
-                  </Text>
-
-                  <Text
-                    style={{
-                      color:
-                        colors.Magenta,
-                      fontWeight:
-                        "700",
-                    }}
-                  >
-                    {formatMoney(
-                      balance
-                    )}
-                  </Text>
-
-                </View>
-
+                />
               </View>
 
               <TouchableOpacity
@@ -1981,18 +2059,16 @@ Balance: ${formatMoney(selectedBill.balance)}
                   styles.primaryButton
                 }
                 onPress={
-                  handleCreateBillPress
+                  handleCreateBill
                 }
               >
-
                 <Text
                   style={
                     styles.primaryButtonText
                   }
                 >
-                  Create Invoice
+                  Create Bill
                 </Text>
-
               </TouchableOpacity>
 
               <View
@@ -2000,52 +2076,63 @@ Balance: ${formatMoney(selectedBill.balance)}
                   styles.bottomSpace
                 }
               />
-
             </ScrollView>
-
           </View>
-
         </View>
-
       </Modal>
 
-      {/* =================================================
-          BILL DETAILS MODAL
-      ================================================= */}
+      {/* =====================================================
+          DETAILS MODAL
+      ===================================================== */}
 
       <Modal
-        visible={showDetailsModal}
+        visible={
+          showDetailsModal
+        }
         animationType="slide"
         transparent
         onRequestClose={() =>
-          setShowDetailsModal(false)
+          setShowDetailsModal(
+            false
+          )
         }
       >
-
-        <View style={styles.modalOverlay}>
-
-          <View style={styles.modalCard}>
-
+        <View
+          style={
+            styles.modalOverlay
+          }
+        >
+          <View
+            style={
+              styles.modalCard
+            }
+          >
             {selectedBill && (
-              <ScrollView
-                showsVerticalScrollIndicator={
-                  false
-                }
-              >
-
+              <>
                 <View
                   style={
                     styles.modalHeader
                   }
                 >
+                  <View>
+                    <Text
+                      style={
+                        styles.modalTitle
+                      }
+                    >
+                      BILL DETAILS
+                    </Text>
 
-                  <Text
-                    style={
-                      styles.modalTitle
-                    }
-                  >
-                    Bill Details
-                  </Text>
+                    <Text
+                      style={
+                        styles.modalSubtitle
+                      }
+                    >
+                      {getInvoiceNumber(
+                        selectedBill
+                      )}
+                    </Text>
+                  </View>
 
                   <TouchableOpacity
                     onPress={() =>
@@ -2054,232 +2141,330 @@ Balance: ${formatMoney(selectedBill.balance)}
                       )
                     }
                   >
+                    <MaterialCommunityIcons
+  name="close"
+  size={24}
+  color="#AD1457"
+/>
+                  </TouchableOpacity>
+                </View>
 
+                <ScrollView
+                  showsVerticalScrollIndicator={
+                    false
+                  }
+                >
+                  <View
+                    style={
+                      styles.detailHero
+                    }
+                  >
+                    <View>
+                      <Text
+                        style={
+                          styles.detailCustomer
+                        }
+                      >
+                        {
+                          selectedBill.customerName
+                        }
+                      </Text>
+
+                      
+                    </View>
+
+                    <StatusBadge
+                      status={
+                        selectedBill.status
+                      }
+                    />
+                  </View>
+
+                  <View
+                    style={
+                      styles.detailsSection
+                    }
+                  >
                     <Text
                       style={
-                        styles.closeButton
+                        styles.detailsSectionTitle
                       }
                     >
-                      ×
+                      BILL INFORMATION
                     </Text>
 
-                  </TouchableOpacity>
-
-                </View>
-
-                <View
-                  style={
-                    styles.invoiceHeader
-                  }
-                >
-
-                  <Text
-                    style={
-                      styles.invoiceBrand
-                    }
-                  >
-                    Femme Fatale Boutique
-                  </Text>
-
-                  <Text
-                    style={
-                      styles.invoiceTagline
-                    }
-                  >
-                    Style Speaks Louder ♡
-                  </Text>
-
-                </View>
-
-                <View
-                  style={
-                    styles.detailCard
-                  }
-                >
-
-                  <Text
-                    style={
-                      styles.detailCustomer
-                    }
-                  >
-                    {selectedBill.customerName}
-                  </Text>
-
-                  <Text
-                    style={
-                      styles.detailItem
-                    }
-                  >
-                    {selectedBill.item}
-                  </Text>
-
-                  <Text
-                    style={
-                      styles.detailDate
-                    }
-                  >
-                    {formatDate(
-                      selectedBill.billDate
-                    )}
-                  </Text>
-
-                </View>
-
-                <View
-                  style={
-                    styles.detailCard
-                  }
-                >
-
-                  <DetailRow
-                    label="Subtotal"
-                    value={formatMoney(
-                      selectedBill.subtotal
-                    )}
-                  />
-
-                  <DetailRow
-                    label="Discount"
-                    value={`- ${formatMoney(
-                      selectedBill.discount
-                    )}`}
-                  />
-
-                  <DetailRow
-                    label="Tax"
-                    value={formatMoney(
-                      selectedBill.tax
-                    )}
-                  />
-
-                  <DetailRow
-                    label="Total"
-                    value={formatMoney(
-                      selectedBill.total
-                    )}
-                    bold
-                  />
-
-                  <DetailRow
-                    label="Paid"
-                    value={formatMoney(
-                      selectedBill.paidAmount
-                    )}
-                  />
-
-                  <DetailRow
-                    label="Balance"
-                    value={formatMoney(
-                      selectedBill.balance
-                    )}
-                    bold
-                    valueColor={
-                      selectedBill.balance >
-                      0
-                        ? colors.Magenta
-                        : colors.Green
-                    }
-                  />
-
-                </View>
-
-                <TouchableOpacity
-                  style={
-                    styles.primaryButton
-                  }
-                  onPress={() => {
-
-                    setShowDetailsModal(
-                      false
-                    );
-
-                    setShowReceiptModal(
-                      true
-                    );
-
-                  }}
-                >
-
-                  <Text
-                    style={
-                      styles.primaryButtonText
-                    }
-                  >
-                    View Receipt
-                  </Text>
-
-                </TouchableOpacity>
-
-                {selectedBill.balance >
-                  0 && (
-
-                  <TouchableOpacity
-                    style={
-                      styles.secondaryButton
-                    }
-                    onPress={() =>
-                      openPayment(
+                    <DetailRow
+                      label="Invoice"
+                      value={getInvoiceNumber(
                         selectedBill
-                      )
+                      )}
+                    />
+
+                    <DetailRow
+                      label="Date"
+                      value={formatDate(
+                        selectedBill.billDate
+                      )}
+                    />
+
+                    <DetailRow
+                      label="Item"
+                      value={"â€”"}
+                    />
+
+                    <DetailRow
+                      label="Quantity"
+                      value={String(
+                        selectedBill.quantity ||
+                          0
+                      )}
+                    />
+
+                    <DetailRow
+                      label="Payment Method"
+                      value={
+                        selectedBill.paymentMethod ||
+                        "-"
+                      }
+                    />
+                  </View>
+
+                  <View
+                    style={
+                      styles.detailsSection
                     }
                   >
-
                     <Text
                       style={
-                        styles.secondaryButtonText
+                        styles.detailsSectionTitle
                       }
                     >
-                      Add Payment
+                      Amount Details
                     </Text>
 
-                  </TouchableOpacity>
-                )}
+                    <DetailRow
+                      label="Subtotal"
+                      value={money(
+                        selectedBill.subtotal
+                      )}
+                    />
 
-                <View
-                  style={
-                    styles.bottomSpace
-                  }
-                />
+                    <DetailRow
+                      label="Discount"
+                      value={`-${money(
+                        selectedBill.discount
+                      )}`}
+                    />
 
-              </ScrollView>
+                    <DetailRow
+                      label="Total"
+                      value={money(
+                        selectedBill.total
+                      )}
+                      strong
+                    />
+
+                    <DetailRow
+                      label="Paid"
+                      value={money(
+                        selectedBill.paidAmount
+                      )}
+                    />
+
+                    <DetailRow
+                      label="Balance"
+                      value={money(
+                        selectedBill.balance
+                      )}
+                      strong
+                      danger={
+                        selectedBill.balance >
+                        0
+                      }
+                    />
+                  </View>
+
+                  <View
+                    style={
+                      styles.detailsSection
+                    }
+                  >
+                    <Text
+                      style={
+                        styles.detailsSectionTitle
+                      }
+                    >
+                      Payment History
+                    </Text>
+
+                    {selectedBillPayments.length ===
+                    0 ? (
+                      <Text
+                        style={
+                          styles.emptyHistory
+                        }
+                      >
+                        No payments recorded yet.
+                      </Text>
+                    ) : (
+                      selectedBillPayments.map(
+                        (
+                          payment
+                        ) => (
+                          <View
+                            key={
+                              payment.id
+                            }
+                            style={
+                              styles.paymentHistoryRow
+                            }
+                          >
+                            <View>
+                              <Text
+                                style={
+                                  styles.paymentHistoryMethod
+                                }
+                              >
+                                {
+                                  payment.method
+                                }
+                              </Text>
+
+                              <Text
+                                style={
+                                  styles.paymentHistoryDate
+                                }
+                              >
+                                {formatDate(
+                                  payment.paymentDate
+                                )}
+                              </Text>
+                            </View>
+
+                            <Text
+                              style={
+                                styles.paymentHistoryAmount
+                              }
+                            >
+                              {money(
+                                payment.amount
+                              )}
+                            </Text>
+                          </View>
+                        )
+                      )
+                    )}
+                  </View>
+
+                  <View
+                    style={
+                      styles.actionGrid
+                    }
+                  >
+                    {selectedBill.balance >
+                      0 && (
+                      <ActionButton
+                        title="Add Payment"
+                        icon="â‚¹"
+                        onPress={() => {
+                          setShowDetailsModal(
+                            false
+                          );
+
+                          openPaymentModal(
+                            selectedBill
+                          );
+                        }}
+                      />
+                    )}
+
+                    {/* =================================================
+                        RECEIPT FIX
+                    ================================================= */}
+
+                    <ActionButton
+                      title="Receipt"
+                      icon="file-document-outline"
+                      onPress={() => {
+                        openReceipt(
+                          selectedBill
+                        );
+                      }}
+                    />
+
+                    <ActionButton
+                      title="Receipt History"
+                      icon="â—·"
+                      onPress={() => {
+                        setShowDetailsModal(
+                          false
+                        );
+
+                        onOpenReceipt();
+                      }}
+                    />
+                  </View>
+
+                  <View
+                    style={
+                      styles.bottomSpace
+                    }
+                  />
+                </ScrollView>
+              </>
             )}
-
           </View>
-
         </View>
-
       </Modal>
 
-      {/* =================================================
+      {/* =====================================================
           PAYMENT MODAL
-      ================================================= */}
+      ===================================================== */}
 
       <Modal
-        visible={showPaymentModal}
-        animationType="slide"
+        visible={
+          showPaymentModal
+        }
+        animationType="fade"
         transparent
         onRequestClose={() =>
-          setShowPaymentModal(false)
+          setShowPaymentModal(
+            false
+          )
         }
       >
-
-        <View style={styles.modalOverlay}>
-
-          <View style={styles.smallModalCard}>
-
+        <View
+          style={
+            styles.modalOverlay
+          }
+        >
+          <View
+            style={
+              styles.smallModalCard
+            }
+          >
             <View
               style={
                 styles.modalHeader
               }
             >
+              <View>
+                <Text
+                  style={
+                    styles.modalTitle
+                  }
+                >
+                  Add Payment
+                </Text>
 
-              <Text
-                style={
-                  styles.modalTitle
-                }
-              >
-                Add Payment
-              </Text>
+                <Text
+                  style={
+                    styles.modalSubtitle
+                  }
+                >
+                  Record customer payment
+                </Text>
+              </View>
 
               <TouchableOpacity
                 onPress={() =>
@@ -2288,60 +2473,50 @@ Balance: ${formatMoney(selectedBill.balance)}
                   )
                 }
               >
-
-                <Text
-                  style={
-                    styles.closeButton
-                  }
-                >
-                  ×
-                </Text>
-
+                <MaterialCommunityIcons
+  name="close"
+  size={24}
+  color="#AD1457"
+/>
               </TouchableOpacity>
-
             </View>
 
             {selectedBill && (
               <>
-
-                <Text
+                <View
                   style={
-                    styles.paymentCustomer
+                    styles.balanceHighlight
                   }
                 >
-                  {selectedBill.customerName}
-                </Text>
+                  <Text
+                    style={
+                      styles.balanceHighlightLabel
+                    }
+                  >
+                    Outstanding Balance
+                  </Text>
 
-                <Text
-                  style={
-                    styles.paymentDue
+                  <Text
+                    style={
+                      styles.balanceHighlightValue
+                    }
+                  >
+                    {money(
+                      selectedBill.balance
+                    )}
+                  </Text>
+                </View>
+
+                <Field
+                  label="Payment Amount"
+                  value={
+                    paymentAmount
                   }
-                >
-                  Balance:{" "}
-                  {formatMoney(
-                    selectedBill.balance
-                  )}
-                </Text>
-
-                <Text
-                  style={
-                    styles.fieldLabel
-                  }
-                >
-                  Amount
-                </Text>
-
-                <TextInput
-                  value={paymentAmount}
                   onChangeText={
                     setPaymentAmount
                   }
+                  placeholder="Enter amount"
                   keyboardType="numeric"
-                  placeholder="₹0"
-                  placeholderTextColor="#999"
-                  style={
-                    styles.textInput
-                  }
                 />
 
                 <Text
@@ -2352,65 +2527,23 @@ Balance: ${formatMoney(selectedBill.balance)}
                   Payment Method
                 </Text>
 
-                <View
-                  style={
-                    styles.paymentMethods
+                <PaymentMethods
+                  selected={
+                    paymentMethodForNewPayment
                   }
-                >
-
-                  {(
-                    [
-                      "Cash",
-                      "UPI",
-                      "Card",
-                      "Other",
-                    ] as PaymentMethod[]
-                  ).map((method) => {
-
-                    const active =
-                      newPaymentMethod ===
-                      method;
-
-                    return (
-                      <TouchableOpacity
-                        key={method}
-                        style={[
-                          styles.paymentMethodButton,
-                          active &&
-                            styles.paymentMethodActive,
-                        ]}
-                        onPress={() =>
-                          setNewPaymentMethod(
-                            method
-                          )
-                        }
-                      >
-
-                        <Text
-                          style={[
-                            styles.paymentMethodText,
-                            active &&
-                              styles.paymentMethodTextActive,
-                          ]}
-                        >
-                          {method}
-                        </Text>
-
-                      </TouchableOpacity>
-                    );
-                  })}
-
-                </View>
+                  onSelect={
+                    setPaymentMethodForNewPayment
+                  }
+                />
 
                 <TouchableOpacity
                   style={
                     styles.primaryButton
                   }
                   onPress={
-                    handleAddPaymentPress
+                    handleAddPayment
                   }
                 >
-
                   <Text
                     style={
                       styles.primaryButtonText
@@ -2418,59 +2551,65 @@ Balance: ${formatMoney(selectedBill.balance)}
                   >
                     Record Payment
                   </Text>
-
                 </TouchableOpacity>
-
               </>
             )}
-
           </View>
-
         </View>
-
       </Modal>
 
-      {/* =================================================
-          RECEIPT MODAL
-      ================================================= */}
+      {/* =====================================================
+          RECEIPT PREVIEW
+      ===================================================== */}
 
       <Modal
-        visible={showReceiptModal}
+        visible={
+          showReceiptModal
+        }
         animationType="slide"
         transparent
         onRequestClose={() =>
-          setShowReceiptModal(false)
+          setShowReceiptModal(
+            false
+          )
         }
       >
-
-        <View style={styles.modalOverlay}>
-
+        <View
+          style={
+            styles.modalOverlay
+          }
+        >
           <View
             style={
-              styles.receiptModalCard
+              styles.modalCard
             }
           >
-
             {selectedBill && (
-              <ScrollView
-                showsVerticalScrollIndicator={
-                  false
-                }
-              >
-
+              <>
                 <View
                   style={
-                    styles.receiptTopBar
+                    styles.modalHeader
                   }
                 >
+                  <View>
+                    <Text
+                      style={
+                        styles.modalTitle
+                      }
+                    >
+                      Receipt Preview
+                    </Text>
 
-                  <Text
-                    style={
-                      styles.modalTitle
-                    }
-                  >
-                    Invoice Preview
-                  </Text>
+                    <Text
+                      style={
+                        styles.modalSubtitle
+                      }
+                    >
+                      {getInvoiceNumber(
+                        selectedBill
+                      )}
+                    </Text>
+                  </View>
 
                   <TouchableOpacity
                     onPress={() =>
@@ -2479,228 +2618,777 @@ Balance: ${formatMoney(selectedBill.balance)}
                       )
                     }
                   >
-
-                    <Text
-                      style={
-                        styles.closeButton
-                      }
-                    >
-                      ×
-                    </Text>
-
+                    <MaterialCommunityIcons
+  name="close"
+  size={24}
+  color="#AD1457"
+/>
                   </TouchableOpacity>
-
                 </View>
 
-                <View
-                  style={
-                    styles.receiptPaper
+                <ScrollView
+                  showsVerticalScrollIndicator={
+                    false
                   }
                 >
+                  <View style={styles.receiptPreview}>
+
+  {/* HEADER */}
+  <Text style={styles.receiptLogo}>
+    FEMMEFATALE
+  </Text>
+
+  <Text style={styles.receiptBoutique}>
+    B O U T I Q U E
+  </Text>
+
+  <Text style={styles.receiptService}>
+    Trendy Outfits | Custom Stitching | Tailoring
+  </Text>
+
+  <Text style={styles.receiptContact}>
+    Phone: +91 8790902827    GSTIN: 37AABCU0026A1Z2
+  </Text>
+
+  <View style={styles.receiptDivider}/>
+
+  {/* BILL INFO */}
+  <View style={styles.invoiceInfo}>
+    <View style={{flex:1}}>
+      <ReceiptRow
+        label="Bill Number"
+        value={getInvoiceNumber(selectedBill)}
+      />
+
+      <ReceiptRow
+        label="Customer Name"
+        value={
+          selectedBill.customerName ||
+          customers.find(
+            (c) =>
+              String(c.id) ===
+              String(selectedBill.customerId)
+          )?.name ||
+          "-"
+        }
+      />
+
+      <ReceiptRow
+        label="GST No"
+        value="No Gst Number"
+      />
+    </View>
+
+    <View style={{flex:1}}>
+      <ReceiptRow
+        label="Booking Date"
+        value={selectedBill.billDate || "-"}
+      />
+
+      <ReceiptRow
+        label="Delivery Date"
+        value="-"
+      />
+
+      <ReceiptRow
+        label="Payment"
+        value={selectedBill.paymentMethod}
+      />
+    </View>
+  </View>
+
+  <View style={styles.receiptDivider}/>
+
+  {/* ITEM TABLE HEADER */}
+  <View style={styles.tableHeader}>
+    <Text style={styles.tableItem}>
+      Item Name | Service | Remarks
+    </Text>
+
+    <Text style={styles.tableQty}>
+      Qty
+    </Text>
+
+    <Text style={styles.tableAmount}>
+      Amount
+    </Text>
+  </View>
+
+  {/* ITEMS */}
+  {selectedBill.items &&
+  selectedBill.items.length > 0 ? (
+    selectedBill.items.map(
+      (item: any, index: number) => (
+        <View
+          key={index}
+          style={styles.tableRow}
+        >
+          <Text style={styles.tableItem}>
+            {item.description}
+          </Text>
+
+          <Text style={styles.tableQty}>
+            {item.quantity}
+          </Text>
+
+          <Text style={styles.tableAmount}>
+            {money(item.amount)}
+          </Text>
+        </View>
+      )
+    )
+  ) : (
+    <View style={styles.tableRow}>
+      <Text style={styles.tableItem}>
+        {
+          selectedBill.item ||
+          (orders as any).find(
+            (o: any) =>
+              String(o.id) ===
+              String(selectedBill.orderId)
+          )?.item ||
+          (orders as any).find(
+            (o: any) =>
+              String(o.id) ===
+              String(selectedBill.orderId)
+          )?.itemName ||
+          (orders as any).find(
+            (o: any) =>
+              String(o.id) ===
+              String(selectedBill.orderId)
+          )?.productName ||
+          (orders as any).find(
+            (o: any) =>
+              String(o.id) ===
+              String(selectedBill.orderId)
+          )?.product ||
+          "-"
+        }
+      </Text>
+
+      <Text style={styles.tableQty}>
+        {
+          String(
+            selectedBill.quantity ||
+            (orders as any).find(
+              (o: any) =>
+                String(o.id) ===
+                String(selectedBill.orderId)
+            )?.quantity ||
+            (orders as any).find(
+              (o: any) =>
+                String(o.id) ===
+                String(selectedBill.orderId)
+            )?.qty ||
+            1
+          )
+        }
+      </Text>
+
+      <Text style={styles.tableAmount}>
+        {
+          money(
+            selectedBill.price ||
+            (orders as any).find(
+              (o: any) =>
+                String(o.id) ===
+                String(selectedBill.orderId)
+            )?.price ||
+            (orders as any).find(
+              (o: any) =>
+                String(o.id) ===
+                String(selectedBill.orderId)
+            )?.amount ||
+            (orders as any).find(
+              (o: any) =>
+                String(o.id) ===
+                String(selectedBill.orderId)
+            )?.total ||
+            0
+          )
+        }
+      </Text>
+    </View>
+  )}
+
+  <View style={styles.receiptDivider}/>
+
+  {/* TOTAL SECTION */}
+  <ReceiptRow
+    label="Total Pieces"
+    value={
+      String(
+        selectedBill.quantity ||
+        (orders as any).find(
+          (o: any) =>
+            String(o.id) ===
+            String(selectedBill.orderId)
+        )?.quantity ||
+        (orders as any).find(
+          (o: any) =>
+            String(o.id) ===
+            String(selectedBill.orderId)
+        )?.qty ||
+        1
+      )
+    }
+  />
+
+  <ReceiptRow
+    label="Total Price"
+    value={money(selectedBill.subtotal)}
+  />
+
+  <ReceiptRow
+    label="Discount"
+    value={`-${money(selectedBill.discount)}`}
+  />
+
+  <ReceiptRow
+    label="Net Price"
+    value={money(
+      Number(selectedBill.subtotal) -
+      Number(selectedBill.discount)
+    )}
+  />
+
+  <ReceiptRow
+    label="CGST (9%)"
+    value={money(Number(selectedBill.tax) / 2)}
+  />
+
+  <ReceiptRow
+    label="SGST (9%)"
+    value={money(Number(selectedBill.tax) / 2)}
+  />
+
+  <View style={styles.grandTotalBox}>
+    <Text style={styles.grandTotalLabel}>
+      Grand Total
+    </Text>
+
+    <Text style={styles.grandTotalValue}>
+      {money(selectedBill.total)}
+    </Text>
+  </View>
+
+  <View style={styles.receiptDivider}/>
+
+  <Text style={styles.receiptFooterBrand}>
+    Thank you for choosing FemmeFatale!
+  </Text>
+
+  <Text style={styles.receiptFooter}>
+    We look forward to serving you again!
+  </Text>
+
+  <Text style={styles.receiptFooterBrand}>
+    FemmeFatale Boutique
+  </Text>
+
+</View>
+<View
+                    style={
+                      styles.receiptActions
+                    }
+                  >
+                    <ReceiptActionButton
+                      icon="P"
+                      title="Print"
+                      onPress={
+                        handlePrintReceipt
+                      }
+                      loading={
+                        receiptBusy ===
+                        "print"
+                      }
+                    />
+
+                    <ReceiptActionButton
+                      icon="S"
+                      title="Share"
+                      onPress={
+                        handleShareReceipt
+                      }
+                      loading={
+                        receiptBusy ===
+                        "share"
+                      }
+                    />
+                  </View>
 
                   <Text
                     style={
-                      styles.receiptBrand
+                      styles.exportNote
                     }
                   >
-                    Femme Fatale Boutique
-                  </Text>
-
-                  <Text
-                    style={
-                      styles.receiptTagline
-                    }
-                  >
-                    Style Speaks Louder ♡
+                    Print opens the device print screen. From there you can choose "Save as PDF".
                   </Text>
 
                   <View
                     style={
-                      styles.receiptLine
+                      styles.bottomSpace
                     }
                   />
-
-                  <Text
-                    style={
-                      styles.receiptInvoiceTitle
-                    }
-                  >
-                    INVOICE
-                  </Text>
-
-                  <Text
-                    style={
-                      styles.receiptCustomer
-                    }
-                  >
-                    {selectedBill.customerName}
-                  </Text>
-
-                  <Text
-                    style={
-                      styles.receiptItem
-                    }
-                  >
-                    {selectedBill.item}
-                  </Text>
-
-                  <Text
-                    style={
-                      styles.receiptDate
-                    }
-                  >
-                    {formatDate(
-                      selectedBill.billDate
-                    )}
-                  </Text>
-
-                  <View
-                    style={
-                      styles.receiptLine
-                    }
-                  />
-
-                  <DetailRow
-                    label="Quantity"
-                    value={String(
-                      selectedBill.quantity
-                    )}
-                  />
-
-                  <DetailRow
-                    label="Rate"
-                    value={formatMoney(
-                      selectedBill.price
-                    )}
-                  />
-
-                  <DetailRow
-                    label="Subtotal"
-                    value={formatMoney(
-                      selectedBill.subtotal
-                    )}
-                  />
-
-                  <DetailRow
-                    label="Discount"
-                    value={`- ${formatMoney(
-                      selectedBill.discount
-                    )}`}
-                  />
-
-                  <DetailRow
-                    label="Tax"
-                    value={formatMoney(
-                      selectedBill.tax
-                    )}
-                  />
-
-                  <DetailRow
-                    label="Total"
-                    value={formatMoney(
-                      selectedBill.total
-                    )}
-                    bold
-                  />
-
-                  <DetailRow
-                    label="Paid"
-                    value={formatMoney(
-                      selectedBill.paidAmount
-                    )}
-                  />
-
-                  <DetailRow
-                    label="Balance"
-                    value={formatMoney(
-                      selectedBill.balance
-                    )}
-                    bold
-                    valueColor={
-                      selectedBill.balance >
-                      0
-                        ? colors.Magenta
-                        : colors.Green
-                    }
-                  />
-
-                  <View
-                    style={
-                      styles.receiptLine
-                    }
-                  />
-
-                  <Text
-                    style={
-                      styles.receiptFooter
-                    }
-                  >
-                    Thank you for choosing
-                    {"\n"}
-                    Femme Fatale Boutique
-                    {"\n\n"}
-                    Style Speaks Louder ♡
-                  </Text>
-
-                </View>
-
-                {/* EXPORT PDF */}
-
-                <ReceiptActionButton
-                  icon="💾"
-                  title="Save / Export PDF"
-                  onPress={
-                    handleExportReceipt
-                  }
-                  loading={
-                    receiptBusy ===
-                    "export"
-                  }
-                />
-
-                {/* PRINT */}
-
-                <ReceiptActionButton
-                  icon="🖨️"
-                  title="Print Invoice"
-                  onPress={
-                    handlePrintReceipt
-                  }
-                  loading={
-                    receiptBusy ===
-                    "print"
-                  }
-                />
-
-                {/* SHARE */}
-
-                <ReceiptActionButton
-                  icon="↗️"
-                  title="Share Receipt"
-                  onPress={
-                    handleShareReceipt
-                  }
-                  loading={
-                    receiptBusy ===
-                    "share"
-                  }
-                />
-
-                <View
-                  style={
-                    styles.bottomSpace
-                  }
-                />
-
-              </ScrollView>
+                </ScrollView>
+              </>
             )}
-
           </View>
+        </View>
+      </Modal>
+    </View>
+  );
+}
 
+/* =========================================================
+   SUMMARY CARD
+========================================================= */
+
+function SummaryCard({
+  title,
+  value,
+  icon,
+}: {
+  title: string;
+  value: string;
+  icon: string;
+}) {
+  return (
+    <View
+      style={
+        styles.summaryCard
+      }
+    >
+      <View
+        style={
+          styles.summaryIcon
+        }
+      >
+        <MaterialCommunityIcons
+          name={icon as any}
+          size={22}
+          color="#AD1457"
+        />
+      </View>
+
+      <Text
+        style={
+          styles.summaryTitle
+        }
+      >
+        {title}
+      </Text>
+
+      <Text
+        style={
+          styles.summaryValue
+        }
+      >
+        {value}
+      </Text>
+    </View>
+  );
+}
+
+/* =========================================================
+   BILL CARD
+========================================================= */
+
+function BillCard({
+  bill,
+  onPress,
+  onPayment,
+}: {
+  bill: Bill;
+  onPress: () => void;
+  onPayment: () => void;
+}) {
+  return (
+    <TouchableOpacity
+      activeOpacity={0.9}
+      style={
+        styles.billCard
+      }
+      onPress={
+        onPress
+      }
+    >
+      <View
+        style={
+          styles.billTop
+        }
+      >
+        <View
+          style={
+            styles.invoiceIcon
+          }
+        >
+          <MaterialCommunityIcons name="file-document-outline" size={23} color="#AD1457" />
         </View>
 
-      </Modal>
+        <View
+          style={
+            styles.billMain
+          }
+        >
+          <Text
+            style={
+              styles.billCustomer
+            }
+          >
+            {
+              bill.customerName
+            }
+          </Text>
 
+          <Text
+            style={
+              styles.billItem
+            }
+          >
+            {
+              bill.item
+            }
+          </Text>
+
+          <Text
+            style={
+              styles.billNumber
+            }
+          >
+            {getInvoiceNumber(
+              bill
+            )}{" "}
+            |{" "}{" "}
+            {formatDate(
+              bill.billDate
+            )}
+          </Text>
+        </View>
+
+        <StatusBadge
+          status={
+            bill.status
+          }
+        />
+      </View>
+
+      <View
+        style={
+          styles.billDivider
+        }
+      />
+
+      <View
+        style={
+          styles.billAmountRow
+        }
+      >
+        <View>
+          <Text
+            style={
+              styles.amountLabel
+            }
+          >
+            Total
+          </Text>
+
+          <Text
+            style={
+              styles.totalAmount
+            }
+          >
+            {money(
+              bill.total
+            )}
+          </Text>
+        </View>
+
+        <View
+          style={
+            styles.amountMiddle
+          }
+        >
+          <Text
+            style={
+              styles.amountLabel
+            }
+          >
+            Paid
+          </Text>
+
+          <Text
+            style={
+              styles.paidAmount
+            }
+          >
+            {money(
+              bill.paidAmount
+            )}
+          </Text>
+        </View>
+
+        <View
+          style={
+            styles.amountRight
+          }
+        >
+          <Text
+            style={
+              styles.amountLabel
+            }
+          >
+            Due
+          </Text>
+
+          <Text
+            style={[
+              styles.dueAmount,
+              bill.balance <=
+                0 &&
+                styles.paidAmount,
+            ]}
+          >
+            {money(
+              bill.balance
+            )}
+          </Text>
+        </View>
+      </View>
+
+      {bill.balance >
+        0 && (
+        <TouchableOpacity
+          style={
+            styles.payButton
+          }
+          onPress={(
+            event
+          ) => {
+            event.stopPropagation();
+            onPayment();
+          }}
+        >
+          <Text
+            style={
+              styles.payButtonText
+            }
+          >
+            + Add Payment
+          </Text>
+        </TouchableOpacity>
+      )}
+    </TouchableOpacity>
+  );
+}
+
+/* =========================================================
+   STATUS
+========================================================= */
+
+function StatusBadge({
+  status,
+}: {
+  status: BillStatus;
+}) {
+  return (
+    <View
+      style={[
+        styles.statusBadge,
+        {
+          backgroundColor:
+            statusBackground(
+              status
+            ),
+        },
+      ]}
+    >
+      <View
+        style={[
+          styles.statusDot,
+          {
+            backgroundColor:
+              statusColor(
+                status
+              ),
+          },
+        ]}
+      />
+
+      <Text
+        style={[
+          styles.statusText,
+          {
+            color:
+              statusColor(
+                status
+              ),
+          },
+        ]}
+      >{status === "Paid" || status === "Partially Paid" || status === "Unpaid" ? status : "Status"}</Text>
+    </View>
+  );
+}
+
+/* =========================================================
+   FIELD
+========================================================= */
+
+function Field({
+  label,
+  value,
+  onChangeText,
+  placeholder,
+  keyboardType = "default",
+}: {
+  label: string;
+  value: string;
+  onChangeText: (
+    value: string
+  ) => void;
+  placeholder: string;
+  keyboardType?:
+    | "default"
+    | "numeric";
+}) {
+  return (
+    <View
+      style={
+        styles.fieldContainer
+      }
+    >
+      <Text
+        style={
+          styles.fieldLabel
+        }
+      >
+        {label}
+      </Text>
+
+      <TextInput
+        value={value}
+        onChangeText={
+          onChangeText
+        }
+        placeholder={
+          placeholder
+        }
+        placeholderTextColor="#A59BA0"
+        keyboardType={
+          keyboardType
+        }
+        style={
+          styles.input
+        }
+      />
+    </View>
+  );
+}
+
+/* =========================================================
+   PAYMENT METHODS
+========================================================= */
+
+function PaymentMethods({
+  selected,
+  onSelect,
+}: {
+  selected: PaymentMethod;
+  onSelect: (
+    method: PaymentMethod
+  ) => void;
+}) {
+  const methods: PaymentMethod[] =
+    [
+      "Cash",
+      "UPI",
+      "Card",
+      "Other",
+    ];
+
+  return (
+    <View
+      style={
+        styles.paymentMethodGrid
+      }
+    >
+      {methods.map(
+        (method) => (
+          <TouchableOpacity
+            key={
+              method
+            }
+            style={[
+              styles.paymentMethodButton,
+              selected ===
+                method &&
+                styles.paymentMethodButtonActive,
+            ]}
+            onPress={() =>
+              onSelect(
+                method
+              )
+            }
+          >
+            <Text
+              style={[
+                styles.paymentMethodText,
+                selected ===
+                  method &&
+                  styles.paymentMethodTextActive,
+              ]}
+            >
+              {method}
+            </Text>
+          </TouchableOpacity>
+        )
+      )}
+    </View>
+  );
+}
+
+/* =========================================================
+   CALCULATION ROW
+========================================================= */
+
+function CalculationRow({
+  label,
+  value,
+  strong = false,
+  danger = false,
+}: {
+  label: string;
+  value: string;
+  strong?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <View
+      style={
+        styles.calculationRow
+      }
+    >
+      <Text
+        style={[
+          styles.calculationLabel,
+          strong &&
+            styles.calculationStrong,
+        ]}
+      >
+        {label}
+      </Text>
+
+      <Text
+        style={[
+          styles.calculationValue,
+          strong &&
+            styles.calculationStrong,
+          danger &&
+            styles.calculationDanger,
+        ]}
+      >
+        {value}
+      </Text>
     </View>
   );
 }
@@ -2712,13 +3400,13 @@ Balance: ${formatMoney(selectedBill.balance)}
 function DetailRow({
   label,
   value,
-  bold = false,
-  valueColor,
+  strong = false,
+  danger = false,
 }: {
   label: string;
   value: string;
-  bold?: boolean;
-  valueColor?: string;
+  strong?: boolean;
+  danger?: boolean;
 }) {
   return (
     <View
@@ -2726,13 +3414,53 @@ function DetailRow({
         styles.detailRow
       }
     >
+      <Text
+        style={
+          styles.detailLabel
+        }
+      >
+        {label}
+      </Text>
 
       <Text
         style={[
-          styles.detailRowLabel,
-          bold && {
-            fontWeight: "700",
-          },
+          styles.detailValue,
+          strong &&
+            styles.detailValueStrong,
+          danger &&
+            styles.detailValueDanger,
+        ]}
+      >
+        {value}
+      </Text>
+    </View>
+  );
+}
+
+/* =========================================================
+   RECEIPT ROW
+========================================================= */
+
+function ReceiptRow({
+  label,
+  value,
+  strong = false,
+}: {
+  label: string;
+  value: string;
+  strong?: boolean;
+}) {
+  return (
+    <View
+      style={
+        styles.receiptRow
+      }
+    >
+      <Text
+        style={[
+          styles.receiptRowLabel,
+          strong &&
+            styles.receiptRowStrong,
         ]}
       >
         {label}
@@ -2740,19 +3468,53 @@ function DetailRow({
 
       <Text
         style={[
-          styles.detailRowValue,
-          bold && {
-            fontWeight: "700",
-          },
-          valueColor && {
-            color: valueColor,
-          },
+          styles.receiptRowValue,
+          strong &&
+            styles.receiptRowStrong,
         ]}
       >
         {value}
       </Text>
-
     </View>
+  );
+}
+
+/* =========================================================
+   ACTION BUTTON
+========================================================= */
+
+function ActionButton({
+  title,
+  icon,
+  onPress,
+}: {
+  title: string;
+  icon: string;
+  onPress: () => void;
+}) {
+  return (
+    <TouchableOpacity
+      style={
+        styles.actionButton
+      }
+      onPress={
+        onPress
+      }
+    >
+      <Text
+        style={
+          styles.actionButtonIcon
+        }
+      >{title === "Receipt" ? "R" : title === "Receipt History" ? "H" : title === "Add Payment" ? "+" : ""}</Text>
+
+      <Text
+        style={
+          styles.actionButtonText
+        }
+      >
+        {title}
+      </Text>
+    </TouchableOpacity>
   );
 }
 
@@ -2776,30 +3538,95 @@ function ReceiptActionButton({
       style={
         styles.receiptActionButton
       }
-      onPress={onPress}
-      disabled={loading}
-      activeOpacity={0.8}
+      onPress={
+        onPress
+      }
+      disabled={
+        loading
+      }
     >
-
-      <Text
-        style={
-          styles.receiptActionIcon
-        }
-      >
-        {icon}
-      </Text>
+      {loading ? (
+        <ActivityIndicator
+          size="small"
+          color={
+            colors.PrimaryWine
+          }
+        />
+      ) : (
+        <Text
+          style={
+            styles.receiptActionIcon
+          }
+        >{title === "Print" ? "P" : title === "Share" ? "S" : ""}</Text>
+      )}
 
       <Text
         style={
           styles.receiptActionText
         }
       >
-        {loading
-          ? "Please wait..."
-          : title}
+        {title}
+      </Text>
+    </TouchableOpacity>
+  );
+}
+
+/* =========================================================
+   EMPTY STATE
+========================================================= */
+
+function EmptyState({
+  onCreate,
+}: {
+  onCreate: () => void;
+}) {
+  return (
+    <View
+      style={
+        styles.emptyState
+      }
+    >
+      <View
+        style={
+          styles.emptyIcon
+        }
+      >
+        <MaterialCommunityIcons name="receipt-text-outline" size={30} color="#AD1457" />
+      </View>
+
+      <Text
+        style={
+          styles.emptyTitle
+        }
+      >
+        No invoices found
       </Text>
 
-    </TouchableOpacity>
+      <Text
+        style={
+          styles.emptyDescription
+        }
+      >
+        Create your first invoice to start tracking boutique payments.
+      </Text>
+
+      <TouchableOpacity
+        style={
+          styles.emptyButton
+        }
+        onPress={
+          onCreate
+        }
+      >
+        <Text
+          style={
+            styles.emptyButtonText
+          }
+        >
+          + Create Bill
+        </Text>
+      </TouchableOpacity>
+    </View>
   );
 }
 
@@ -2807,693 +3634,1254 @@ function ReceiptActionButton({
    STYLES
 ========================================================= */
 
-const styles = StyleSheet.create({
-
-  container: {
-    flex: 1,
-    backgroundColor: colors.Cream,
-  },
-
-  scroll: {
-    flex: 1,
-  },
-
-  scrollContent: {
-    padding: 16,
-    paddingBottom: 40,
-  },
-
-  /* HEADER */
-
-  header: {
-    height: 70,
-    backgroundColor:
-      colors.PrimaryWine,
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 16,
-  },
-
-  backButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor:
-      "rgba(255,255,255,0.15)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  backText: {
-    color: colors.White,
-    fontSize: 34,
-    lineHeight: 36,
-    marginTop: -3,
-  },
-
-  headerCenter: {
-    flex: 1,
-    alignItems: "center",
-  },
-
-  brandText: {
-    color: colors.White,
-    fontSize: 13,
-    fontWeight: "600",
-    letterSpacing: 0.5,
-  },
-
-  headerTitle: {
-    color: colors.White,
-    fontSize: 20,
-    fontWeight: "800",
-    marginTop: 2,
-  },
-
-  addButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor:
-      colors.Gold,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  addButtonText: {
-    color: colors.White,
-    fontSize: 28,
-    lineHeight: 30,
-    fontWeight: "300",
-  },
-
-  /* BRAND CARD */
-
-  brandCard: {
-    backgroundColor: colors.White,
-    borderRadius: 18,
-    padding: 20,
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: colors.Border,
-  },
-
-  brandCardTitle: {
-    color: colors.PrimaryWine,
-    fontSize: 22,
-    fontWeight: "800",
-  },
-
-  brandCardSubtitle: {
-    color: colors.Muted,
-    marginTop: 5,
-    fontSize: 13,
-  },
-
-  /* SUMMARY */
-
-  summaryGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent:
-      "space-between",
-    marginBottom: 14,
-  },
-
-  summaryCard: {
-    width: "48.5%",
-    backgroundColor: colors.White,
-    borderRadius: 15,
-    padding: 15,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: colors.Border,
-  },
-
-  summaryLabel: {
-    color: colors.Muted,
-    fontSize: 12,
-    fontWeight: "600",
-  },
-
-  summaryValue: {
-    color: colors.DarkText,
-    fontSize: 19,
-    fontWeight: "800",
-    marginTop: 6,
-  },
-
-  /* SEARCH */
-
-  searchInput: {
-    height: 50,
-    backgroundColor: colors.White,
-    borderRadius: 14,
-    paddingHorizontal: 16,
-    borderWidth: 1,
-    borderColor: colors.Border,
-    color: colors.DarkText,
-    marginBottom: 12,
-  },
-
-  filterScroll: {
-    marginBottom: 15,
-  },
-
-  filterButton: {
-    paddingHorizontal: 15,
-    paddingVertical: 9,
-    borderRadius: 20,
-    backgroundColor:
-      colors.White,
-    marginRight: 8,
-    borderWidth: 1,
-    borderColor: colors.Border,
-  },
-
-  filterButtonActive: {
-    backgroundColor:
-      colors.PrimaryWine,
-    borderColor:
-      colors.PrimaryWine,
-  },
-
-  filterText: {
-    color: colors.DarkText,
-    fontSize: 12,
-    fontWeight: "600",
-  },
-
-  filterTextActive: {
-    color: colors.White,
-  },
-
-  /* BILL CARD */
-
-  billCard: {
-    backgroundColor: colors.White,
-    borderRadius: 17,
-    padding: 16,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: colors.Border,
-  },
-
-  billTopRow: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-  },
-
-  billCustomerSection: {
-    flex: 1,
-  },
-
-  billCustomer: {
-    color: colors.DarkText,
-    fontSize: 17,
-    fontWeight: "800",
-  },
-
-  billItem: {
-    color: colors.Muted,
-    fontSize: 13,
-    marginTop: 4,
-  },
-
-  statusBadge: {
-    borderRadius: 20,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-
-  statusText: {
-    fontSize: 11,
-    fontWeight: "800",
-  },
-
-  billDivider: {
-    height: 1,
-    backgroundColor:
-      "#F0E8EB",
-    marginVertical: 14,
-  },
-
-  billInfoRow: {
-    flexDirection: "row",
-    justifyContent:
-      "space-between",
-  },
-
-  infoLabel: {
-    color: colors.Muted,
-    fontSize: 10,
-    marginBottom: 3,
-  },
-
-  infoValue: {
-    color: colors.DarkText,
-    fontSize: 14,
-    fontWeight: "800",
-  },
-
-  billDate: {
-    color: colors.Muted,
-    fontSize: 11,
-    marginTop: 13,
-  },
-
-  /* EMPTY */
-
-  emptyCard: {
-    backgroundColor: colors.White,
-    borderRadius: 20,
-    padding: 30,
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: colors.Border,
-    marginTop: 10,
-  },
-
-  emptyIcon: {
-    width: 62,
-    height: 62,
-    borderRadius: 31,
-    backgroundColor:
-      colors.SoftPink,
-    textAlign: "center",
-    textAlignVertical: "center",
-    fontSize: 26,
-    fontWeight: "800",
-    color: colors.PrimaryWine,
-    paddingTop: 14,
-    overflow: "hidden",
-  },
-
-  emptyTitle: {
-    color: colors.DarkText,
-    fontSize: 18,
-    fontWeight: "800",
-    marginTop: 15,
-  },
-
-  emptyText: {
-    color: colors.Muted,
-    textAlign: "center",
-    marginTop: 6,
-    lineHeight: 20,
-    marginBottom: 18,
-  },
-
-  /* MODALS */
-
-  modalOverlay: {
-    flex: 1,
-    backgroundColor:
-      "rgba(0,0,0,0.45)",
-    justifyContent: "flex-end",
-  },
-
-  modalCard: {
-    backgroundColor: colors.Cream,
-    borderTopLeftRadius: 25,
-    borderTopRightRadius: 25,
-    maxHeight: "92%",
-    padding: 18,
-  },
-
-  smallModalCard: {
-    backgroundColor: colors.Cream,
-    borderTopLeftRadius: 25,
-    borderTopRightRadius: 25,
-    padding: 20,
-  },
-
-  receiptModalCard: {
-    backgroundColor: colors.Cream,
-    borderTopLeftRadius: 25,
-    borderTopRightRadius: 25,
-    maxHeight: "95%",
-    padding: 16,
-  },
-
-  modalHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent:
-      "space-between",
-    marginBottom: 18,
-  },
-
-  modalTitle: {
-    color: colors.PrimaryWine,
-    fontSize: 21,
-    fontWeight: "800",
-  },
-
-  closeButton: {
-    color: colors.PrimaryWine,
-    fontSize: 32,
-    lineHeight: 32,
-    fontWeight: "300",
-  },
-
-  /* FIELDS */
-
-  fieldLabel: {
-    color: colors.DarkText,
-    fontSize: 12,
-    fontWeight: "700",
-    marginTop: 13,
-    marginBottom: 7,
-  },
-
-  textInput: {
-    height: 48,
-    backgroundColor: colors.White,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: colors.Border,
-    paddingHorizontal: 14,
-    color: colors.DarkText,
-  },
-
-  customerSelector: {
-    marginBottom: 4,
-  },
-
-  customerChip: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    backgroundColor:
-      colors.White,
-    borderRadius: 20,
-    marginRight: 8,
-    borderWidth: 1,
-    borderColor: colors.Border,
-  },
-
-  customerChipActive: {
-    backgroundColor:
-      colors.PrimaryWine,
-    borderColor:
-      colors.PrimaryWine,
-  },
-
-  customerChipText: {
-    color: colors.DarkText,
-    fontSize: 12,
-    fontWeight: "600",
-  },
-
-  customerChipTextActive: {
-    color: colors.White,
-  },
-
-  /* PAYMENT */
-
-  paymentMethods: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-  },
-
-  paymentMethodButton: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    backgroundColor:
-      colors.White,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: colors.Border,
-  },
-
-  paymentMethodActive: {
-    backgroundColor:
-      colors.PrimaryWine,
-    borderColor:
-      colors.PrimaryWine,
-  },
-
-  paymentMethodText: {
-    color: colors.DarkText,
-    fontSize: 12,
-    fontWeight: "600",
-  },
-
-  paymentMethodTextActive: {
-    color: colors.White,
-  },
-
-  /* CALCULATION */
-
-  calculationCard: {
-    backgroundColor:
-      colors.SoftPink,
-    borderRadius: 16,
-    padding: 16,
-    marginTop: 18,
-  },
-
-  calculationRow: {
-    flexDirection: "row",
-    justifyContent:
-      "space-between",
-    paddingVertical: 6,
-  },
-
-  calculationTotal: {
-    borderTopWidth: 1,
-    borderTopColor:
-      "rgba(139,18,56,0.2)",
-    marginTop: 6,
-    paddingTop: 12,
-  },
-
-  calculationTotalText: {
-    color: colors.PrimaryWine,
-    fontSize: 17,
-    fontWeight: "800",
-  },
-
-  /* BUTTONS */
-
-  primaryButton: {
-    backgroundColor:
-      colors.PrimaryWine,
-    borderRadius: 14,
-    minHeight: 50,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 20,
-    marginTop: 18,
-  },
-
-  primaryButtonText: {
-    color: colors.White,
-    fontSize: 15,
-    fontWeight: "800",
-  },
-
-  secondaryButton: {
-    backgroundColor:
-      colors.SoftPink,
-    borderRadius: 14,
-    minHeight: 50,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 20,
-    marginTop: 10,
-  },
-
-  secondaryButtonText: {
-    color: colors.PrimaryWine,
-    fontSize: 15,
-    fontWeight: "800",
-  },
-
-  /* DETAILS */
-
-  invoiceHeader: {
-    alignItems: "center",
-    paddingBottom: 16,
-    borderBottomWidth: 1,
-    borderBottomColor:
-      colors.Border,
-  },
-
-  invoiceBrand: {
-    color: colors.PrimaryWine,
-    fontSize: 22,
-    fontWeight: "800",
-  },
-
-  invoiceTagline: {
-    color: colors.Muted,
-    fontSize: 12,
-    marginTop: 4,
-  },
-
-  detailCard: {
-    backgroundColor: colors.White,
-    borderRadius: 15,
-    padding: 16,
-    marginTop: 12,
-    borderWidth: 1,
-    borderColor: colors.Border,
-  },
-
-  detailCustomer: {
-    color: colors.DarkText,
-    fontSize: 18,
-    fontWeight: "800",
-  },
-
-  detailItem: {
-    color: colors.PrimaryWine,
-    fontSize: 14,
-    fontWeight: "600",
-    marginTop: 4,
-  },
-
-  detailDate: {
-    color: colors.Muted,
-    fontSize: 11,
-    marginTop: 7,
-  },
-
-  detailRow: {
-    flexDirection: "row",
-    justifyContent:
-      "space-between",
-    paddingVertical: 7,
-  },
-
-  detailRowLabel: {
-    color: colors.Muted,
-    fontSize: 13,
-  },
-
-  detailRowValue: {
-    color: colors.DarkText,
-    fontSize: 13,
-  },
-
-  /* PAYMENT MODAL */
-
-  paymentCustomer: {
-    color: colors.DarkText,
-    fontSize: 18,
-    fontWeight: "800",
-  },
-
-  paymentDue: {
-    color: colors.Magenta,
-    fontSize: 14,
-    fontWeight: "700",
-    marginTop: 5,
-  },
-
-  /* RECEIPT */
-
-  receiptTopBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent:
-      "space-between",
-    marginBottom: 10,
-  },
-
-  receiptPaper: {
-    backgroundColor: colors.White,
-    borderRadius: 4,
-    padding: 22,
-    borderWidth: 1,
-    borderColor:
-      "#E3E3E3",
-  },
-
-  receiptBrand: {
-    color: colors.PrimaryWine,
-    textAlign: "center",
-    fontSize: 23,
-    fontWeight: "800",
-  },
-
-  receiptTagline: {
-    color: colors.Muted,
-    textAlign: "center",
-    fontSize: 12,
-    marginTop: 4,
-  },
-
-  receiptInvoiceTitle: {
-    color: colors.DarkText,
-    textAlign: "center",
-    fontSize: 18,
-    fontWeight: "800",
-    marginBottom: 15,
-  },
-
-  receiptCustomer: {
-    color: colors.DarkText,
-    textAlign: "center",
-    fontSize: 17,
-    fontWeight: "800",
-  },
-
-  receiptItem: {
-    color: colors.PrimaryWine,
-    textAlign: "center",
-    fontSize: 14,
-    marginTop: 4,
-  },
-
-  receiptDate: {
-    color: colors.Muted,
-    textAlign: "center",
-    fontSize: 11,
-    marginTop: 5,
-  },
-
-  receiptLine: {
-    height: 1,
-    backgroundColor:
-      "#E7E7E7",
-    marginVertical: 15,
-  },
-
-  receiptFooter: {
-    color: colors.Muted,
-    textAlign: "center",
-    fontSize: 12,
-    lineHeight: 19,
-  },
-
-  receiptActionButton: {
-    backgroundColor: colors.White,
-    borderRadius: 14,
-    minHeight: 54,
-    marginTop: 10,
-    paddingHorizontal: 16,
-    flexDirection: "row",
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: colors.Border,
-  },
-
-  receiptActionIcon: {
-    fontSize: 20,
-    width: 35,
-  },
-
-  receiptActionText: {
-    color: colors.DarkText,
-    fontSize: 14,
-    fontWeight: "700",
-  },
-
-  bottomSpace: {
-    height: 25,
-  },
-
-});
+const styles =
+  StyleSheet.create({
+    container: {
+      flex: 1,
+      backgroundColor:
+        colors.Cream,
+    },
+
+    scrollContent: {
+      paddingHorizontal: 18,
+      paddingTop: 30,
+      paddingBottom: 50,
+    },
+
+    header: {
+      flexDirection:
+        "row",
+      alignItems:
+        "flex-start",
+      marginBottom: 20,
+    },
+
+    backButton: {
+      width: 42,
+      height: 42,
+      borderRadius: 12,
+      backgroundColor:
+        colors.White,
+      justifyContent:
+        "center",
+      alignItems:
+        "center",
+      borderWidth: 1,
+      borderColor:
+        colors.Border,
+      marginRight: 12,
+    },
+
+    backText: {
+      color:
+        colors.PrimaryWine,
+      fontSize: 30,
+      lineHeight: 32,
+    },
+
+    headerTextArea: {
+      flex: 1,
+    },
+
+    title: {
+      color:
+        colors.DarkText,
+      fontSize: 28,
+      fontWeight: "800",
+    },
+
+    subtitle: {
+      color:
+        colors.Muted,
+      fontSize: 13,
+      marginTop: 3,
+    },
+
+    addButton: {
+      backgroundColor:
+        colors.PrimaryWine,
+      paddingHorizontal: 15,
+      paddingVertical: 11,
+      borderRadius: 12,
+    },
+
+    addButtonText: {
+      color:
+        colors.White,
+      fontSize: 13,
+      fontWeight: "800",
+    },
+
+    summaryGrid: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      justifyContent: "space-between",
+      columnGap: 0,
+      rowGap: 12,
+      marginBottom: 20,
+    },
+
+    summaryCard: {
+      width: "48%",
+      minHeight: 116,
+      backgroundColor: colors.White,
+      borderRadius: 20,
+      padding: 14,
+      borderWidth: 1,
+      borderColor: "#F3C6D8",
+      shadowColor: "#AD1457",
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.07,
+      shadowRadius: 10,
+      elevation: 3,
+    },
+    summaryIcon: {
+      width: 30,
+      height: 30,
+      borderRadius: 9,
+      backgroundColor:
+        colors.SoftPink,
+      justifyContent:
+        "center",
+      alignItems:
+        "center",
+      marginBottom: 7,
+    },
+
+    summaryIconText: {
+      color:
+        colors.PrimaryWine,
+      fontSize: 13,
+      fontWeight: "800",
+    },
+
+    summaryTitle: {
+      color:
+        colors.Muted,
+      fontSize: 11,
+      fontWeight: "600",
+    },
+
+    summaryValue: {
+      color:
+        colors.DarkText,
+      fontSize: 16,
+      fontWeight: "800",
+      marginTop: 3,
+    },
+
+    searchContainer: {
+      height: 52,
+      borderRadius: 16,
+      backgroundColor: colors.White,
+      borderWidth: 1,
+      borderColor: "#F3C6D8",
+      flexDirection: "row",
+      alignItems: "center",
+      paddingHorizontal: 15,
+      marginBottom: 14,
+      shadowColor: "#AD1457",
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.04,
+      shadowRadius: 6,
+      elevation: 2,
+    },
+    searchIcon: {
+      color:
+        colors.PrimaryWine,
+      fontSize: 23,
+      marginRight: 7,
+    },
+
+    searchInput: {
+      flex: 1,
+      color:
+        colors.DarkText,
+      fontSize: 14,
+    },
+
+    filterRow: {
+      gap: 8,
+      paddingBottom: 18,
+    },
+
+    filterChip: {
+      borderWidth: 1,
+      borderColor:
+        colors.Border,
+      backgroundColor:
+        colors.White,
+      paddingHorizontal: 14,
+      paddingVertical: 9,
+      borderRadius: 20,
+    },
+
+    filterChipActive: {
+      backgroundColor:
+        colors.PrimaryWine,
+      borderColor:
+        colors.PrimaryWine,
+    },
+
+    filterText: {
+      color:
+        colors.DarkText,
+      fontSize: 12,
+      fontWeight: "700",
+    },
+
+    filterTextActive: {
+      color:
+        colors.White,
+    },
+
+    sectionHeader: {
+      flexDirection:
+        "row",
+      justifyContent:
+        "space-between",
+      alignItems:
+        "flex-end",
+      marginBottom: 12,
+    },
+
+    sectionTitle: {
+      color:
+        colors.DarkText,
+      fontSize: 18,
+      fontWeight: "800",
+    },
+
+    sectionSubtitle: {
+      color:
+        colors.Muted,
+      fontSize: 11,
+      marginTop: 2,
+    },
+
+    pendingText: {
+      color:
+        colors.Orange,
+      fontSize: 12,
+      fontWeight: "700",
+    },
+
+    billCard: {
+      backgroundColor: "#FFFFFF",
+      borderRadius: 22,
+      borderWidth: 1,
+      borderColor: "#F3C6D8",
+      padding: 18,
+      marginBottom: 16,
+      shadowColor: "#AD1457",
+      shadowOffset: { width: 0, height: 5 },
+      shadowOpacity: 0.09,
+      shadowRadius: 12,
+      elevation: 4,
+    },
+    billTop: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+    },
+
+    invoiceIcon: {
+      width: 46,
+      height: 46,
+      borderRadius: 15,
+      backgroundColor: "#FCE5EF",
+      justifyContent: "center",
+      alignItems: "center",
+      marginRight: 12,
+      borderWidth: 1,
+      borderColor: "#F3D4E0",
+    },
+
+    invoiceIconText: {
+      color:
+        colors.PrimaryWine,
+      fontSize: 18,
+      fontWeight: "800",
+    },
+
+    billMain: {
+      flex: 1,
+      minWidth: 0,
+      paddingRight: 4,
+    },
+
+    billCustomer: {
+      color: "#33232B",
+      fontSize: 15,
+      fontWeight: "900",
+      flexShrink: 1,
+    },
+
+    billItem: {
+      color:
+        colors.PrimaryWine,
+      fontSize: 12,
+      fontWeight: "700",
+      marginTop: 3,
+    },
+
+    billNumber: {
+      color: "#8A737D",
+      fontSize: 11,
+      fontWeight: "600",
+      marginTop: 6,
+    },
+
+    statusBadge: {
+      flexDirection: "row",
+      alignItems: "center",
+      borderRadius: 20,
+      paddingHorizontal: 11,
+      paddingVertical: 7,
+      marginLeft: 6,
+      minHeight: 30,
+    },
+    statusDot: {
+      width: 6,
+      height: 6,
+      borderRadius: 3,
+      marginRight: 5,
+    },
+
+    statusText: {
+      fontSize: 9,
+      fontWeight: "800",
+    },
+
+    billDivider: {
+      height: 1,
+      backgroundColor:
+        colors.Border,
+      marginVertical: 13,
+    },
+
+    billAmountRow: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      paddingVertical: 2,
+    },
+
+    amountLabel: {
+      color: "#8A737D",
+      fontSize: 11,
+      fontWeight: "700",
+      marginBottom: 5,
+    },
+
+    totalAmount: {
+      color: "#AD1457",
+      fontSize: 16,
+      fontWeight: "900",
+    },
+
+    amountMiddle: {
+      alignItems:
+        "center",
+    },
+
+    paidAmount: {
+      color: "#2E7D32",
+      fontSize: 14,
+      fontWeight: "800",
+    },
+
+    amountRight: {
+      alignItems:
+        "flex-end",
+    },
+
+    dueAmount: {
+      color: "#C62828",
+      fontSize: 14,
+      fontWeight: "900",
+    },
+
+    payButton: {
+      alignSelf: "flex-end",
+      backgroundColor: "#FCE5EF",
+      paddingHorizontal: 15,
+      paddingVertical: 10,
+      borderRadius: 13,
+      marginTop: 13,
+      borderWidth: 1,
+      borderColor: "#F3C6D8",
+    },
+    payButtonText: {
+      color:
+        colors.PrimaryWine,
+      fontSize: 11,
+      fontWeight: "800",
+    },
+
+    emptyState: {
+      backgroundColor:
+        colors.White,
+      borderRadius: 18,
+      padding: 30,
+      alignItems:
+        "center",
+      borderWidth: 1,
+      borderColor:
+        colors.Border,
+      marginTop: 5,
+    },
+
+    emptyIcon: {
+      width: 58,
+      height: 58,
+      borderRadius: 29,
+      backgroundColor:
+        colors.SoftPink,
+      justifyContent:
+        "center",
+      alignItems:
+        "center",
+      marginBottom: 12,
+    },
+
+    emptyIconText: {
+      color:
+        colors.PrimaryWine,
+      fontSize: 23,
+      fontWeight: "800",
+    },
+
+    emptyTitle: {
+      color:
+        colors.DarkText,
+      fontSize: 17,
+      fontWeight: "800",
+    },
+
+    emptyDescription: {
+      color:
+        colors.Muted,
+      fontSize: 12,
+      textAlign:
+        "center",
+      lineHeight: 18,
+      marginTop: 7,
+      maxWidth: 280,
+    },
+
+    emptyButton: {
+      backgroundColor:
+        colors.PrimaryWine,
+      paddingHorizontal: 16,
+      paddingVertical: 10,
+      borderRadius: 11,
+      marginTop: 17,
+    },
+
+    emptyButtonText: {
+      color:
+        colors.White,
+      fontSize: 12,
+      fontWeight: "800",
+    },
+
+    modalOverlay: {
+      flex: 1,
+      backgroundColor:
+        "rgba(36,33,36,0.55)",
+      justifyContent:
+        "flex-end",
+    },
+    modalCard: {
+      backgroundColor: colors.White,
+      borderTopLeftRadius: 25,
+      borderTopRightRadius: 25,
+      maxHeight: "94%",
+      paddingHorizontal: 20,
+      paddingTop: 22,
+      paddingBottom: 28,
+    },
+
+    smallModalCard: {
+      backgroundColor:
+        colors.White,
+      borderTopLeftRadius: 25,
+      borderTopRightRadius: 25,
+      paddingHorizontal: 18,
+      paddingTop: 18,
+      paddingBottom: 30,
+    },
+
+    modalHeader: {
+      flexDirection:
+        "row",
+      justifyContent:
+        "space-between",
+      alignItems:
+        "flex-start",
+      marginBottom: 18,
+    },
+
+    modalTitle: {
+      color:
+        colors.DarkText,
+      fontSize: 21,
+      fontWeight: "800",
+    },
+
+    modalSubtitle: {
+      color:
+        colors.Muted,
+      fontSize: 11,
+      marginTop: 3,
+    },
+
+    closeText: {
+      color:
+        colors.PrimaryWine,
+      fontSize: 30,
+      lineHeight: 28,
+      fontWeight: "300",
+    },
+
+    fieldContainer: {
+      marginBottom: 15,
+    },
+
+    fieldLabel: {
+      color:
+        colors.DarkText,
+      fontSize: 12,
+      fontWeight: "800",
+      marginBottom: 7,
+    },
+
+    input: {
+      height: 48,
+      borderRadius: 11,
+      borderWidth: 1,
+      borderColor:
+        colors.Border,
+      backgroundColor:
+        colors.White,
+      paddingHorizontal: 13,
+      color:
+        colors.DarkText,
+      fontSize: 13,
+    },
+    chipList: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      paddingHorizontal: 2,
+      paddingBottom: 18,
+      paddingTop: 6,
+    },
+    choiceChip: {
+      borderWidth: 1,
+      borderColor: colors.Border,
+      backgroundColor: colors.White,
+      paddingHorizontal: 18,
+      paddingVertical: 12,
+      borderRadius: 24,
+      minHeight: 46,
+      justifyContent: "center",
+      alignItems: "center",
+    },
+
+    choiceChipActive: {
+      backgroundColor:
+        "#AD1457",
+      borderColor:
+        "#AD1457",
+    },
+
+    choiceChipBilled: {
+      borderColor:
+        colors.Orange,
+      backgroundColor:
+        "#FFF8EF",
+    },
+    choiceChipText: {
+      color: colors.DarkText,
+      fontSize: 13,
+      fontWeight: "700",
+    },
+
+    choiceChipTextActive: {
+      color:
+        colors.White,
+    },
+
+    existingBillWarning: {
+      backgroundColor:
+        "#FFF1DE",
+      borderWidth: 1,
+      borderColor:
+        colors.Orange,
+      borderRadius: 14,
+      padding: 14,
+      marginBottom: 16,
+    },
+
+    existingBillWarningTitle: {
+      color:
+        colors.DarkText,
+      fontSize: 13,
+      fontWeight: "800",
+    },
+
+    existingBillWarningText: {
+      color:
+        colors.Muted,
+      fontSize: 11,
+      marginTop: 5,
+    },
+
+    existingBillNumber: {
+      color:
+        colors.PrimaryWine,
+      fontSize: 13,
+      fontWeight: "800",
+      marginTop: 5,
+    },
+
+    existingBillAmount: {
+      color:
+        colors.DarkText,
+      fontSize: 11,
+      fontWeight: "700",
+      marginTop: 3,
+    },
+
+    viewExistingButton: {
+      alignSelf:
+        "flex-start",
+      backgroundColor:
+        colors.PrimaryWine,
+      paddingHorizontal: 13,
+      paddingVertical: 9,
+      borderRadius: 9,
+      marginTop: 11,
+    },
+
+    viewExistingButtonText: {
+      color:
+        colors.White,
+      fontSize: 11,
+      fontWeight: "800",
+    },
+
+    twoColumn: {
+      flexDirection:
+        "row",
+      gap: 10,
+    },
+
+    column: {
+      flex: 1,
+    },
+
+    paymentMethodGrid: {
+      flexDirection:
+        "row",
+      flexWrap:
+        "wrap",
+      gap: 7,
+      marginBottom: 15,
+    },
+
+    paymentMethodButton: {
+      paddingHorizontal: 13,
+      paddingVertical: 9,
+      borderRadius: 10,
+      backgroundColor:
+        colors.White,
+      borderWidth: 1,
+      borderColor:
+        colors.Border,
+    },
+
+    paymentMethodButtonActive: {
+      backgroundColor:
+        colors.PrimaryWine,
+      borderColor:
+        colors.PrimaryWine,
+    },
+
+    paymentMethodText: {
+      color:
+        colors.DarkText,
+      fontSize: 11,
+      fontWeight: "700",
+    },
+
+    paymentMethodTextActive: {
+      color:
+        colors.White,
+    },
+
+    calculationCard: {
+      backgroundColor:
+        colors.White,
+      borderRadius: 14,
+      padding: 14,
+      borderWidth: 1,
+      borderColor:
+        colors.Border,
+      marginBottom: 17,
+    },
+
+    calculationRow: {
+      flexDirection:
+        "row",
+      justifyContent:
+        "space-between",
+      paddingVertical: 5,
+    },
+
+    calculationLabel: {
+      color:
+        colors.Muted,
+      fontSize: 12,
+    },
+
+    calculationValue: {
+      color:
+        colors.DarkText,
+      fontSize: 12,
+      fontWeight: "700",
+    },
+
+    calculationStrong: {
+      color:
+        colors.PrimaryWine,
+      fontSize: 14,
+      fontWeight: "800",
+    },
+
+    calculationDanger: {
+      color:
+        colors.Red,
+    },
+
+    calculationDivider: {
+      height: 1,
+      backgroundColor:
+        colors.Border,
+      marginVertical: 5,
+    },
+
+    primaryButton: {
+      height: 52,
+      borderRadius: 12,
+      backgroundColor:
+        "#AD1457",
+      justifyContent:
+        "center",
+      alignItems:
+        "center",
+      marginBottom: 15,
+    },
+
+    primaryButtonDisabled: {
+      backgroundColor:
+        colors.Muted,
+      opacity: 0.7,
+    },
+
+    primaryButtonText: {
+      color:
+        colors.White,
+      fontSize: 14,
+      fontWeight: "800",
+    },
+
+    detailHero: {
+      backgroundColor:
+        colors.SoftPink,
+      borderRadius: 15,
+      padding: 15,
+      flexDirection:
+        "row",
+      justifyContent:
+        "space-between",
+      alignItems:
+        "center",
+      marginBottom: 17,
+    },
+
+    detailCustomer: {
+      color:
+        colors.DarkText,
+      fontSize: 17,
+      fontWeight: "800",
+    },
+
+    detailItem: {
+      color:
+        colors.PrimaryWine,
+      fontSize: 12,
+      fontWeight: "700",
+      marginTop: 4,
+    },
+
+    detailsSection: {
+      backgroundColor:
+        colors.White,
+      borderRadius: 14,
+      padding: 14,
+      borderWidth: 1,
+      borderColor:
+        colors.Border,
+      marginBottom: 12,
+    },
+
+    detailsSectionTitle: {
+      color:
+        colors.PrimaryWine,
+      fontSize: 13,
+      fontWeight: "800",
+      marginBottom: 9,
+    },
+
+    detailRow: {
+      flexDirection:
+        "row",
+      justifyContent:
+        "space-between",
+      paddingVertical: 7,
+      borderBottomWidth: 1,
+      borderBottomColor:
+        "#F2EAED",
+    },
+
+    detailLabel: {
+      color:
+        colors.Muted,
+      fontSize: 11,
+    },
+
+    detailValue: {
+      color:
+        colors.DarkText,
+      fontSize: 11,
+      fontWeight: "700",
+      maxWidth: "62%",
+      textAlign:
+        "right",
+    },
+
+    detailValueStrong: {
+      color:
+        colors.PrimaryWine,
+      fontSize: 13,
+      fontWeight: "800",
+    },
+
+    detailValueDanger: {
+      color:
+        colors.Red,
+    },
+
+    emptyHistory: {
+      color:
+        colors.Muted,
+      fontSize: 11,
+      paddingVertical: 5,
+    },
+
+    paymentHistoryRow: {
+      flexDirection:
+        "row",
+      justifyContent:
+        "space-between",
+      alignItems:
+        "center",
+      paddingVertical: 9,
+      borderBottomWidth: 1,
+      borderBottomColor:
+        "#F2EAED",
+    },
+
+    paymentHistoryMethod: {
+      color:
+        colors.DarkText,
+      fontSize: 12,
+      fontWeight: "700",
+    },
+
+    paymentHistoryDate: {
+      color:
+        colors.Muted,
+      fontSize: 10,
+      marginTop: 3,
+    },
+
+    paymentHistoryAmount: {
+      color:
+        colors.Green,
+      fontSize: 13,
+      fontWeight: "800",
+    },
+
+    actionGrid: {
+      flexDirection:
+        "row",
+      gap: 10,
+      marginBottom: 15,
+    },
+
+    actionButton: {
+      flex: 1,
+      minHeight: 55,
+      borderRadius: 12,
+      backgroundColor:
+        colors.White,
+      borderWidth: 1,
+      borderColor:
+        colors.Border,
+      justifyContent:
+        "center",
+      alignItems:
+        "center",
+    },
+
+    actionButtonIcon: {
+      color:
+        colors.PrimaryWine,
+      fontSize: 17,
+      fontWeight: "800",
+    },
+
+    actionButtonText: {
+      color:
+        colors.DarkText,
+      fontSize: 10,
+      fontWeight: "700",
+      marginTop: 3,
+    },
+
+    balanceHighlight: {
+      backgroundColor:
+        colors.SoftPink,
+      borderRadius: 14,
+      padding: 15,
+      alignItems:
+        "center",
+      marginBottom: 18,
+    },
+
+    balanceHighlightLabel: {
+      color:
+        colors.Muted,
+      fontSize: 11,
+    },
+
+    balanceHighlightValue: {
+      color:
+        colors.Red,
+      fontSize: 25,
+      fontWeight: "800",
+      marginTop: 4,
+    },
+receiptPreview: {
+  backgroundColor: "#FFFFFF",
+  padding: 20,
+  borderRadius: 12,
+},
+
+receiptBrand: {
+  color: "#AD1457",
+  fontSize: 24,
+  fontWeight: "900",
+},
+
+receiptFashion: {
+  color: "#AD1457",
+  fontSize: 13,
+  textAlign: "center",
+  marginTop: 5,
+  letterSpacing: 1,
+},
+
+receiptBoutique: {
+  textAlign: "center",
+  color: colors.Gold,
+  fontSize: 10,
+  letterSpacing: 4,
+  fontWeight: "800",
+  marginTop: 3,
+},
+
+receiptTagline: {
+  textAlign: "center",
+  color: colors.Muted,
+  fontSize: 10,
+  fontStyle: "italic",
+  marginTop: 5,
+},
+
+receiptDivider: {
+  height: 1,
+  backgroundColor: colors.Border,
+  marginVertical: 14,
+},
+
+receiptPreviewText: {
+  color: "#5A1645",
+  fontSize: 14,
+  marginVertical: 4,
+},
+
+receiptRow: {
+  flexDirection: "row",
+  justifyContent: "space-between",
+  paddingVertical: 5,
+},
+    receiptRowLabel: {
+      color:
+        colors.Muted,
+      fontSize: 11,
+    },
+
+    receiptRowValue: {
+      color:
+        colors.DarkText,
+      fontSize: 11,
+      fontWeight: "700",
+    },
+
+    receiptRowStrong: {
+      color:
+        colors.PrimaryWine,
+      fontSize: 14,
+      fontWeight: "800",
+    },
+
+    receiptFooter: {
+      textAlign:
+        "center",
+      color:
+        colors.Muted,
+      fontSize: 10,
+    },
+receiptFooterBrand:{
+  color:"#AD1457",
+  fontWeight:"800",
+  textAlign:"center",
+  marginTop:8,
+},
+
+receiptLogo: {
+  fontSize: 27,
+  fontWeight: "900",
+  color: "#AD1457",
+  textAlign: "center",
+  marginBottom: 2,
+},
+receiptService: {
+  fontSize: 10,
+  color: "#666666",
+  textAlign: "center",
+  marginTop: 8,
+},
+receiptContact: {
+  fontSize: 9,
+  color: "#444444",
+  textAlign: "center",
+  marginTop: 8,
+  marginBottom: 8,
+},
+invoiceInfo: {
+  flexDirection: "row",
+  justifyContent: "space-between",
+  gap: 8,
+  marginVertical: 10,
+},
+tableHeader: {
+  flexDirection: "row",
+  alignItems: "center",
+  backgroundColor: "#FCE4EC",
+  paddingVertical: 8,
+  paddingHorizontal: 4,
+  marginTop: 8,
+},
+tableItem: {
+  flex: 1,
+  fontSize: 10,
+  color: "#333333",
+  flexWrap: "wrap",
+},
+tableQty: {
+  width: 40,
+  textAlign: "center",
+  fontSize: 10,
+  color: "#333333",
+},
+tableAmount: {
+  width: 75,
+  textAlign: "right",
+  fontSize: 10,
+  color: "#333333",
+},
+tableRow: {
+  flexDirection: "row",
+  alignItems: "center",
+  paddingVertical: 8,
+  paddingHorizontal: 4,
+  borderBottomWidth: 0.5,
+  borderBottomColor: "#EEEEEE",
+},
+grandTotalBox: {
+  flexDirection: "row",
+  justifyContent: "space-between",
+  alignItems: "center",
+  backgroundColor: "#FCE4EC",
+  padding: 12,
+  borderRadius: 8,
+  marginTop: 12,
+  marginBottom: 8,
+},
+grandTotalLabel: {
+  fontSize: 15,
+  fontWeight: "900",
+  color: "#880E4F",
+},
+grandTotalValue: {
+  fontSize: 17,
+  fontWeight: "900",
+  color: "#AD1457",
+},
+    receiptActions:{
+      flexDirection:
+        "row",
+      gap: 10,
+      marginTop: 15,
+    },
+
+    receiptActionButton: {
+      flex: 1,
+      height: 52,
+      borderRadius: 12,
+      backgroundColor:
+        colors.White,
+      borderWidth: 1,
+      borderColor:
+        colors.Border,
+      justifyContent:
+        "center",
+      alignItems:
+        "center",
+    },
+
+    receiptActionIcon: {
+      fontSize: 17,
+      color:
+        colors.PrimaryWine,
+    },
+
+    receiptActionText: {
+      color:
+        colors.DarkText,
+      fontSize: 11,
+      fontWeight: "800",
+      marginTop: 3,
+    },
+
+    exportNote: {
+      color:
+        colors.Muted,
+      fontSize: 10,
+      textAlign:
+        "center",
+      lineHeight: 15,
+      marginTop: 10,
+      paddingHorizontal: 15,
+    },
+
+    statusRow: {
+
+
+      flexDirection: "row",
+
+
+      flexWrap: "wrap",
+
+
+      gap: 8,
+
+
+      marginBottom: 12,
+
+
+    },    
+    itemCard: {
+      backgroundColor: "#FFF7F8",
+      borderWidth: 1,
+      borderColor: colors.Border,
+      borderRadius: 18,
+      padding: 18,
+      marginBottom: 16,
+      gap: 12,
+    },
+
+bottomSpace: {
+      height: 140,
+    },
+  });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

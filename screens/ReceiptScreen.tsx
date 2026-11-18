@@ -1,8 +1,8 @@
+﻿import { SafeAreaView } from "react-native-safe-area-context";
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Modal,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
@@ -15,13 +15,13 @@ import * as Sharing from "expo-sharing";
 import * as FileSystem from "expo-file-system/legacy";
 
 import type { Customer } from "./CustomersScreen";
-import type { Bill } from "./BillingScreen";
+import type { Bill } from "../lib/billService";
 
 function formatCurrency(value: number) {
-  return `₹${Number(value || 0).toLocaleString("en-IN", {
+  return "Rs. " + Number(value || 0).toLocaleString("en-IN", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  })}`;
+  });
 }
 
 function escapeHtml(value: string) {
@@ -175,7 +175,7 @@ function buildReceiptHtml(
   <div class="brand">
     <h1>FemmeBill</h1>
     <p>Tailoring &amp; Boutique Management</p>
-    <p>Payment Receipt</p>
+    <p>BILL</p>
   </div>
 
   <div class="divider"></div>
@@ -251,11 +251,6 @@ function buildReceiptHtml(
       <span>${formatCurrency(bill.discount)}</span>
     </div>
 
-    <div class="row">
-      <span>Tax</span>
-      <span>${formatCurrency(bill.tax)}</span>
-    </div>
-
     <div class="row total">
       <span>Grand Total</span>
       <span>${formatCurrency(bill.total)}</span>
@@ -302,8 +297,10 @@ function buildReceiptHtml(
   </div>
 
   <div class="footer">
-    Thank you for choosing FemmeBill.
-  </div>
+  <p>This bill is valid up to 30 days only.</p>
+  <p>Thank you for choosing Femme Fatale Boutique ♡</p>
+  <p>Shop No. 27, VMRDA Complex, Udyog Bhavan Complex, Siripuram Junction, Visakhapatnam – 530003, Andhra Pradesh.</p>
+</div>
 
 </div>
 </body>
@@ -732,13 +729,13 @@ export default function ReceiptScreen({
           style={styles.backButton}
         >
           <Text style={styles.backText}>
-            ← Home
+            â† Home
           </Text>
         </TouchableOpacity>
 
         <View style={styles.headerTextWrap}>
           <Text style={styles.title}>
-            🧾 Receipts
+            ðŸ§¾ Receipts
           </Text>
 
           <Text style={styles.subtitle}>
@@ -756,7 +753,7 @@ export default function ReceiptScreen({
             <View style={styles.savedSectionHeader}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.savedSectionTitle}>
-                  💾 Saved Receipts
+                  ðŸ’¾ Saved Receipts
                 </Text>
 
                 <Text style={styles.savedSectionSubtitle}>
@@ -794,7 +791,7 @@ export default function ReceiptScreen({
                   </Text>
 
                   <Text style={styles.savedMeta}>
-                    {bill.billDate} •{" "}
+                    {bill.billDate} â€¢{" "}
                     {formatCurrency(bill.total)}
                   </Text>
                 </TouchableOpacity>
@@ -816,7 +813,7 @@ export default function ReceiptScreen({
                       {busyAction ===
                       `saved-share-${bill.id}`
                         ? "..."
-                        : "📤"}
+                        : "ðŸ“¤"}
                     </Text>
                   </TouchableOpacity>
 
@@ -829,7 +826,7 @@ export default function ReceiptScreen({
                     <Text
                       style={styles.smallActionText}
                     >
-                      🗑️
+                      ðŸ—‘ï¸
                     </Text>
                   </TouchableOpacity>
                 </View>
@@ -841,7 +838,7 @@ export default function ReceiptScreen({
         {paidBills.length === 0 ? (
           <View style={styles.emptyCard}>
             <Text style={styles.emptyIcon}>
-              🧾
+              ðŸ§¾
             </Text>
 
             <Text style={styles.emptyTitle}>
@@ -908,7 +905,7 @@ export default function ReceiptScreen({
               </View>
 
               <Text style={styles.tapText}>
-                Tap to view receipt →
+                Tap to view receipt â†’
               </Text>
             </TouchableOpacity>
           ))
@@ -934,12 +931,12 @@ export default function ReceiptScreen({
                 style={styles.closeButton}
               >
                 <Text style={styles.closeText}>
-                  ✕
+                  âœ•
                 </Text>
               </TouchableOpacity>
 
               <Text style={styles.modalTitle}>
-                Payment Receipt
+                Bill
               </Text>
 
               <View style={{ width: 42 }} />
@@ -956,7 +953,7 @@ export default function ReceiptScreen({
 
               <View style={styles.actionsRow}>
                 <ActionButton
-                  icon="📤"
+                  icon="ðŸ“¤"
                   label="Share Receipt"
                   onPress={() =>
                     void handleShare()
@@ -967,7 +964,7 @@ export default function ReceiptScreen({
                 />
 
                 <ActionButton
-                  icon="🟢"
+                  icon="ðŸŸ¢"
                   label="WhatsApp"
                   onPress={() =>
                     void handleWhatsApp()
@@ -980,7 +977,7 @@ export default function ReceiptScreen({
 
               <View style={styles.actionsRow}>
                 <ActionButton
-                  icon="🖨️"
+                  icon="ðŸ–¨ï¸"
                   label="Print Receipt"
                   onPress={() =>
                     void handlePrint()
@@ -991,7 +988,7 @@ export default function ReceiptScreen({
                 />
 
                 <ActionButton
-                  icon="💾"
+                  icon="ðŸ’¾"
                   label="Save / Export PDF"
                   onPress={() =>
                     void handleExport()
@@ -1023,7 +1020,7 @@ export default function ReceiptScreen({
                 </Text>
 
                 <Text style={styles.receiptLabel}>
-                  PAYMENT RECEIPT
+                  BILL
                 </Text>
 
                 <View style={styles.divider} />
@@ -1103,7 +1100,7 @@ export default function ReceiptScreen({
                       Qty{" "}
                       {selectedBill.quantity ||
                         1}{" "}
-                      ×{" "}
+                      Ã—{" "}
                       {formatCurrency(
                         selectedBill.price
                       )}
@@ -1138,13 +1135,6 @@ export default function ReceiptScreen({
                     label="Discount"
                     value={
                       selectedBill.discount
-                    }
-                  />
-
-                  <SummaryRow
-                    label="Tax"
-                    value={
-                      selectedBill.tax
                     }
                   />
 
@@ -1214,7 +1204,7 @@ export default function ReceiptScreen({
                       styles.paidBannerText
                     }
                   >
-                    ✓ PAYMENT{" "}
+                    âœ“ PAYMENT{" "}
                     {selectedBill.status.toUpperCase()}
                   </Text>
                 </View>
@@ -1843,3 +1833,4 @@ const styles = StyleSheet.create({
     marginTop: 18,
   },
 });
+

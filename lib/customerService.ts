@@ -1,120 +1,150 @@
-import { supabase } from "./supabase";
+﻿import { supabase } from "./supabase";
 
-export type SupabaseCustomer = {
-  id: string;
-  shop_id: string;
+export type CustomerInput = {
   name: string;
   phone: string;
   email: string;
   address: string;
   notes: string;
-  is_active: boolean;
-  created_at: string;
-  updated_at: string;
 };
 
-export async function getMyCustomerShopId() {
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("shop_id")
-    .single();
+export type Customer = CustomerInput & {
+  id: string;
+  orders?: number;
+};
 
-  if (error) {
-    throw new Error(error.message);
+type CustomerRow = {
+  id: string;
+  name: string | null;
+  phone: string | null;
+  email: string | null;
+  address: string | null;
+  notes: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+const mapCustomer = (row: CustomerRow): Customer => ({
+  id: row.id,
+  name: row.name ?? "",
+  phone: row.phone ?? "",
+  email: row.email ?? "",
+  address: row.address ?? "",
+  notes: row.notes ?? "",
+});
+
+export const getMyCustomerShopId = async (): Promise<string> => {
+  const {
+    data: { user },
+    error: userError,
+  } = await supabase.auth.getUser();
+
+  if (userError) {
+    throw userError;
   }
 
-  if (!data?.shop_id) {
-    throw new Error("No shop is connected to this account.");
+  if (!user) {
+    throw new Error("User is not authenticated.");
   }
 
-  return data.shop_id;
-}
+  const { data: shopId, error: shopError } =
+    await supabase.rpc("get_my_shop_id");
 
-export async function fetchCustomers(): Promise<SupabaseCustomer[]> {
+  if (shopError) {
+    throw shopError;
+  }
+
+  if (!shopId) {
+    throw new Error(
+      "No shop is assigned to the current user."
+    );
+  }
+
+  return String(shopId);
+};
+
+export const fetchCustomers = async (): Promise<Customer[]> => {
   const { data, error } = await supabase
     .from("customers")
     .select("*")
-    .eq("is_active", true)
     .order("created_at", { ascending: false });
 
   if (error) {
-    throw new Error(error.message);
+    console.error("FETCH CUSTOMERS ERROR:", error);
+    throw error;
   }
 
-  return data ?? [];
-}
+  return (data ?? []).map((row: CustomerRow) =>
+    mapCustomer(row)
+  );
+};
 
-export async function createCustomer(input: {
-  name: string;
-  phone: string;
-  email: string;
-  address: string;
-  notes: string;
-}) {
+export const createCustomer = async (
+  customer: CustomerInput
+): Promise<Customer> => {
   const shopId = await getMyCustomerShopId();
 
+  const payload = {
+    shop_id: shopId,
+    name: customer.name.trim(),
+    phone: customer.phone.trim(),
+    email: customer.email.trim(),
+    address: customer.address.trim(),
+    notes: customer.notes.trim(),
+  };
+
   const { data, error } = await supabase
     .from("customers")
-    .insert({
-      shop_id: shopId,
-      name: input.name.trim(),
-      phone: input.phone.trim(),
-      email: input.email.trim(),
-      address: input.address.trim(),
-      notes: input.notes.trim(),
-      is_active: true,
-    })
-    .select()
+    .insert(payload)
+    .select("*")
     .single();
 
   if (error) {
-    throw new Error(error.message);
+    console.error("CREATE CUSTOMER ERROR:", error);
+    throw error;
   }
 
-  return data as SupabaseCustomer;
-}
+  return mapCustomer(data as CustomerRow);
+};
 
-export async function updateCustomer(
+export const updateCustomer = async (
   customerId: string,
-  input: {
-    name: string;
-    phone: string;
-    email: string;
-    address: string;
-    notes: string;
-  }
-) {
+  customer: CustomerInput
+): Promise<Customer> => {
+  const payload = {
+    name: customer.name.trim(),
+    phone: customer.phone.trim(),
+    email: customer.email.trim(),
+    address: customer.address.trim(),
+    notes: customer.notes.trim(),
+  };
+
   const { data, error } = await supabase
     .from("customers")
-    .update({
-      name: input.name.trim(),
-      phone: input.phone.trim(),
-      email: input.email.trim(),
-      address: input.address.trim(),
-      notes: input.notes.trim(),
-      updated_at: new Date().toISOString(),
-    })
+    .update(payload)
     .eq("id", customerId)
-    .select()
+    .select("*")
     .single();
 
   if (error) {
-    throw new Error(error.message);
+    console.error("UPDATE CUSTOMER ERROR:", error);
+    throw error;
   }
 
-  return data as SupabaseCustomer;
-}
+  return mapCustomer(data as CustomerRow);
+};
 
-export async function deactivateCustomer(customerId: string) {
+export const deleteCustomer = async (
+  customerId: string
+): Promise<void> => {
   const { error } = await supabase
     .from("customers")
-    .update({
-      is_active: false,
-      updated_at: new Date().toISOString(),
-    })
+    .delete()
     .eq("id", customerId);
 
   if (error) {
-    throw new Error(error.message);
+    console.error("DELETE CUSTOMER ERROR:", error);
+    throw error;
   }
-}
+};
+

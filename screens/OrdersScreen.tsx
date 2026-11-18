@@ -1,10 +1,21 @@
-import React, { useEffect, useMemo, useState } from "react";
+﻿import { MaterialCommunityIcons } from "@expo/vector-icons";
+import { File } from "expo-file-system";
+import {
+  uploadOrderDesignAsset,
+  uploadSketchPaths,
+  getOrderDesignAssets,
+  downloadSketchPaths,
+  deleteOrderDesignAsset,
+  type OrderDesignAsset,
+} from "../lib/orderDesignAssetService";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import * as ImagePicker from "expo-image-picker";
+import Svg, { Path } from "react-native-svg";
+import { captureRef } from "react-native-view-shot";
 import {
   Alert,
-  KeyboardAvoidingView,
+  Image,
   Modal,
-  Platform,
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -14,11 +25,9 @@ import {
 } from "react-native";
 
 import type { Customer } from "./CustomersScreen";
+import { createMeasurement, updateMeasurement } from "../lib/measurementService";
+import { supabase } from "../lib/supabase";
 import type { Measurement } from "./measurements/MeasurementsScreen";
-
-/* -------------------------------------------------------
-   TYPES
-------------------------------------------------------- */
 
 export type OrderStatus =
   | "New"
@@ -27,11 +36,7 @@ export type OrderStatus =
   | "Stitching"
   | "Trial"
   | "Ready"
-  | "Delivered"
-  // Legacy values are kept so existing Supabase rows do not
-  // break while the app is being moved to the new workflow.
-  | "Pending"
-  | "In Progress";
+  | "Delivered";
 
 export type MeasurementSnapshot = {
   id: string;
@@ -74,259 +79,385 @@ type OrdersScreenProps = {
   orders: Order[];
   onCreateOrder: (order: Order) => Promise<Order>;
   onUpdateOrder: (order: Order) => Promise<Order>;
+  onDeleteOrder: (orderId: string) => Promise<void>;
   onBack: () => void;
+  openCreateForSelectedCustomer?: boolean;
+  onCreateFormOpened?: () => void;
+  onCreateCustomer?: (customer: Customer) => Promise<Customer | null>;
 };
 
-/* -------------------------------------------------------
-   CONSTANTS
-------------------------------------------------------- */
+const colors = {
+  PrimaryWine: "#C2185B",
+  Magenta: "#C2185B",
+  Gold: "#C2185B",
+  Cream: "#FFF5F8",
+  SoftPink: "#FCE4EC",
+  DarkText: "#4A1730",
+  White: "#FFFFFF",
+  Gray: "#777777",
+  LightGray: "#FFF5F8",
+  Border: "#F8BBD0",
+  Green: "#C2185B",
+  Orange: "#C2185B",
+  Blue: "#C2185B",
+  Red: "#C2185B",
+};
 
-const GARMENT_TYPES = [
-  "Blouse",
-  "Chudidar",
-  "Dress",
-  "Pant",
-  "Lehenga",
-  "Kurti",
-  "Other",
-];
-
-const WORKFLOW_STATUSES: OrderStatus[] = [
+const STATUS_LIST: OrderStatus[] = [
   "New",
-  "Measurement",
   "Cutting",
-  "Stitching",
-  "Trial",
   "Ready",
   "Delivered",
 ];
 
-const LEGACY_STATUS_MAP: Record<string, OrderStatus> = {
-  Pending: "New",
-  "In Progress": "Stitching",
+const emptyForm = {
+  customerId: "",
+  item: "",
+  measurementId: "",
+  quantity: "1",
+  price: "",
+  orderDate: "",
+  deliveryDate: "",
+  status: "New" as OrderStatus,
+  notes: "",
 };
 
-const BRAND = {
-  wine: "#8B1238",
-  magenta: "#C2185B",
-  gold: "#C69A3A",
-  cream: "#FFF9F2",
-  softPink: "#FCE8F0",
-  dark: "#242124",
-  white: "#FFFFFF",
-  muted: "#777177",
-  border: "#E9DDE2",
-  green: "#2E7D32",
-  orange: "#C66A00",
-};
+const createId = () =>
+  `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
 /* -------------------------------------------------------
-   HELPERS
+   SAFE LOCAL DATE HELPERS
 ------------------------------------------------------- */
 
-function normalizeStatus(status: OrderStatus | string): OrderStatus {
-  return LEGACY_STATUS_MAP[status] || (status as OrderStatus);
-}
+const pad2 = (value: number) => String(value).padStart(2, "0");
 
-function formatCurrency(value: number | string | undefined) {
-  const amount = Number(value || 0);
-  return `₹${amount.toLocaleString("en-IN")}`;
-}
+const today = () => {
+  const date = new Date();
 
-function getOrderDisplayNumber(order: Order, index = 0) {
-  if (order.orderNumber) return order.orderNumber;
-  if (order.id) {
-    const shortId = order.id.length > 8 ? order.id.slice(0, 8) : order.id;
-    return `ORD-${shortId.toUpperCase()}`;
+  return `${date.getFullYear()}-${pad2(
+    date.getMonth() + 1,
+  )}-${pad2(date.getDate())}`;
+};
+
+const parseLocalDate = (value: string): Date | null => {
+  if (!value) return null;
+
+  const trimmed = value.trim();
+
+  const isoMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+  if (isoMatch) {
+    const year = Number(isoMatch[1]);
+    const month = Number(isoMatch[2]);
+    const day = Number(isoMatch[3]);
+
+    const date = new Date(year, month - 1, day);
+
+    if (
+      date.getFullYear() !== year ||
+      date.getMonth() !== month - 1 ||
+      date.getDate() !== day
+    ) {
+      return null;
+    }
+
+    date.setHours(0, 0, 0, 0);
+    return date;
   }
-  return `ORD-${String(index + 1).padStart(3, "0")}`;
-}
 
-function getMeasurementDateValue(value: string | undefined) {
+  const displayMatch = trimmed.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+
+  if (displayMatch) {
+    const day = Number(displayMatch[1]);
+    const month = Number(displayMatch[2]);
+    const year = Number(displayMatch[3]);
+
+    const date = new Date(year, month - 1, day);
+
+    if (
+      date.getFullYear() !== year ||
+      date.getMonth() !== month - 1 ||
+      date.getDate() !== day
+    ) {
+      return null;
+    }
+
+    date.setHours(0, 0, 0, 0);
+    return date;
+  }
+
+  return null;
+};
+
+const normalizeDate = (value: string) => {
   if (!value) return "";
 
   const trimmed = value.trim();
 
-  const isoMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (isoMatch) {
-    const [, year, month, day] = isoMatch;
-    return `${day}/${month}/${year}`;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return trimmed;
+  }
+
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(trimmed)) {
+    return toDbDate(trimmed);
+  }
+
+  return trimmed;
+};
+
+const formatDate = (value: string) => {
+  if (!value) return "-";
+
+  const date = parseLocalDate(value);
+
+  if (!date) {
+    return value;
+  }
+
+  return date.toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+};
+
+const toDisplayDate = (value: string) => {
+  if (!value) return "";
+
+  const normalized = normalizeDate(value);
+
+  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+  if (match) {
+    return `${match[3]}/${match[2]}/${match[1]}`;
+  }
+
+  return value;
+};
+
+const toDbDate = (value: string) => {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return today();
   }
 
   const displayMatch = trimmed.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (displayMatch) return trimmed;
 
-  return trimmed;
-}
+  if (displayMatch) {
+    const day = Number(displayMatch[1]);
+    const month = Number(displayMatch[2]);
+    const year = Number(displayMatch[3]);
 
-function getLatestMeasurement(
-  customerMeasurements: Measurement[] | undefined
-): Measurement | null {
-  if (!customerMeasurements || customerMeasurements.length === 0) {
-    return null;
-  }
+    const date = new Date(year, month - 1, day);
 
-  return [...customerMeasurements].sort((a, b) => {
-    const aDate = new Date(a.date).getTime();
-    const bDate = new Date(b.date).getTime();
-
-    if (!Number.isNaN(aDate) && !Number.isNaN(bDate)) {
-      return bDate - aDate;
+    if (
+      date.getFullYear() !== year ||
+      date.getMonth() !== month - 1 ||
+      date.getDate() !== day
+    ) {
+      return "";
     }
 
-    return String(b.date).localeCompare(String(a.date));
-  })[0];
-}
-
-function createSnapshot(
-  measurement: Measurement | undefined | null
-): MeasurementSnapshot | null {
-  if (!measurement) return null;
-
-  return {
-    id: measurement.id,
-    date: measurement.date || "",
-    type: measurement.type || "",
-    bust: measurement.bust || "",
-    waist: measurement.waist || "",
-    hip: measurement.hip || "",
-    shoulder: measurement.shoulder || "",
-    sleeveLength: measurement.sleeveLength || "",
-    blouseLength: measurement.blouseLength || "",
-    frontNeck: measurement.frontNeck || "",
-    backNeck: measurement.backNeck || "",
-    armhole: measurement.armhole || "",
-    pantLength: measurement.pantLength || "",
-    notes: measurement.notes || "",
-  };
-}
-
-function getStatusDescription(status: OrderStatus | string) {
-  switch (normalizeStatus(status)) {
-    case "New":
-      return "Order received and waiting to be processed.";
-    case "Measurement":
-      return "Measurements are being taken or confirmed.";
-    case "Cutting":
-      return "Fabric cutting is in progress.";
-    case "Stitching":
-      return "Garment stitching is in progress.";
-    case "Trial":
-      return "Trial fitting is in progress.";
-    case "Ready":
-      return "Garment is ready for customer pickup.";
-    case "Delivered":
-      return "Order has been delivered.";
-    default:
-      return "Order status updated.";
+    return `${year}-${pad2(month)}-${pad2(day)}`;
   }
-}
 
-function getStatusStyle(status: OrderStatus | string) {
-  switch (normalizeStatus(status)) {
-    case "New":
-      return {
-        backgroundColor: "#F4E7EC",
-        textColor: BRAND.wine,
-      };
-    case "Measurement":
-      return {
-        backgroundColor: "#FCEAF1",
-        textColor: BRAND.magenta,
-      };
-    case "Cutting":
-      return {
-        backgroundColor: "#FFF2D8",
-        textColor: "#946200",
-      };
-    case "Stitching":
-      return {
-        backgroundColor: "#F4E8F4",
-        textColor: "#713A75",
-      };
-    case "Trial":
-      return {
-        backgroundColor: "#E9F1F8",
-        textColor: "#28628A",
-      };
-    case "Ready":
-      return {
-        backgroundColor: "#E7F4E9",
-        textColor: BRAND.green,
-      };
-    case "Delivered":
-      return {
-        backgroundColor: "#E5F4EE",
-        textColor: "#216B4B",
-      };
-    default:
-      return {
-        backgroundColor: "#F2EFF1",
-        textColor: BRAND.muted,
-      };
+  const isoMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+  if (isoMatch) {
+    const date = parseLocalDate(trimmed);
+
+    if (!date) {
+      return "";
+    }
+
+    return trimmed;
   }
-}
+
+  return trimmed;
+};
 
 /* -------------------------------------------------------
-   SMALL UI COMPONENTS
+   DISPLAY HELPERS
 ------------------------------------------------------- */
 
-function FieldLabel({ children }: { children: React.ReactNode }) {
-  return <Text style={styles.fieldLabel}>{children}</Text>;
-}
+const money = (value: number) =>
+  "Rs. " +
+  Number(value || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 });
 
-function SummaryPill({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}) {
-  return (
-    <View style={styles.summaryPill}>
-      <Text style={styles.summaryPillValue}>{value}</Text>
-      <Text style={styles.summaryPillLabel}>{label}</Text>
-    </View>
-  );
-}
+const orderTotal = (order: Order) =>
+  Number(order.price || 0) * Number(order.quantity || 1);
 
-function StatusBadge({ status }: { status: OrderStatus | string }) {
-  const normalized = normalizeStatus(status);
-  const colors = getStatusStyle(normalized);
+const statusColor = (status: OrderStatus) => {
+  switch (status) {
+    case "New":
+      return "#AD1457";
+    case "Measurement":
+      return "#C2185B";
+    case "Cutting":
+      return "#C2185B";
+    case "Stitching":
+      return "#C2185B";
+    case "Trial":
+      return "#AD1457";
+    case "Ready":
+      return "#C2185B";
+    case "Delivered":
+      return "#AD8293";
+    default:
+      return colors.PrimaryWine;
+  }
+};
 
-  return (
-    <View
-      style={[
-        styles.statusBadge,
-        { backgroundColor: colors.backgroundColor },
-      ]}
-    >
-      <Text style={[styles.statusBadgeText, { color: colors.textColor }]}>
-        {normalized}
-      </Text>
-    </View>
-  );
-}
+const statusIcon = (status: OrderStatus) => {
+  switch (status) {
+    case "New":
+      return "NEW";
+    case "Measurement":
+      return "MEASURE";
+    case "Cutting":
+      return "CUT";
+    case "Stitching":
+      return "SEW";
+    case "Trial":
+      return "TRIAL";
+    case "Ready":
+      return "READY";
+    case "Delivered":
+      return "DONE";
+    default:
+      return "";
+  }
+};
 
-function MeasurementValue({
-  label,
-  value,
-}: {
-  label: string;
-  value?: string;
-}) {
-  if (!value) return null;
+const statusIndex = (status: OrderStatus) => {
+  switch (status) {
+    case "New":
+    case "Measurement":
+      return 0;
 
-  return (
-    <View style={styles.measurementValue}>
-      <Text style={styles.measurementLabel}>{label}</Text>
-      <Text style={styles.measurementNumber}>{value}</Text>
-    </View>
-  );
-}
+    case "Cutting":
+    case "Stitching":
+      return 1;
+
+    case "Trial":
+    case "Ready":
+      return 2;
+
+    case "Delivered":
+      return 3;
+
+    default:
+      return 0;
+  }
+};
+
+const progressPercent = (status: OrderStatus) => {
+  const index = statusIndex(status);
+
+  if (index < 0) return 0;
+
+  return Math.round((index / (STATUS_LIST.length - 1)) * 100);
+};
 
 /* -------------------------------------------------------
-   SCREEN
+   DELIVERY STATUS
+------------------------------------------------------- */
+
+type DeliveryInfo = {
+  label: string;
+  shortLabel: string;
+  color: string;
+  background: string;
+};
+
+const getDeliveryInfo = (order: Order): DeliveryInfo => {
+  if (order.status === "Delivered") {
+    return {
+      label: "Delivered",
+      shortLabel: "Delivered",
+      color: colors.Green,
+      background: "#FCE4EC",
+    };
+  }
+
+  if (!order.deliveryDate) {
+    return {
+      label: "Upcoming",
+      shortLabel: "Upcoming",
+      color: colors.Blue,
+      background: "#FCE4EC",
+    };
+  }
+
+  const delivery = parseLocalDate(order.deliveryDate);
+
+  const current = parseLocalDate(today());
+
+  if (!delivery || !current) {
+    return {
+      label: "Upcoming",
+      shortLabel: "Upcoming",
+      color: colors.Blue,
+      background: "#FCE4EC",
+    };
+  }
+
+  const difference = Math.round(
+    (delivery.getTime() - current.getTime()) / (1000 * 60 * 60 * 24),
+  );
+
+  if (difference < 0) {
+    const days = Math.abs(difference);
+
+    return {
+      label: `Overdue by ${days} day${days === 1 ? "" : "s"}`,
+      shortLabel: "Overdue",
+      color: colors.Red,
+      background: "#FCE4EC",
+    };
+  }
+
+  if (difference === 0) {
+    return {
+      label: "Due Today",
+      shortLabel: "Due Today",
+      color: colors.Orange,
+      background: "#FCE4EC",
+    };
+  }
+
+  return {
+    label: "Upcoming",
+    shortLabel: "Upcoming",
+    color: colors.Blue,
+    background: "#FCE4EC",
+  };
+};
+
+/* -------------------------------------------------------
+   MEASUREMENT SNAPSHOT
+------------------------------------------------------- */
+
+const makeSnapshot = (measurement: Measurement): MeasurementSnapshot => ({
+  id: measurement.id,
+  date: measurement.date,
+  type: measurement.type,
+  bust: measurement.bust,
+  waist: measurement.waist,
+  hip: measurement.hip,
+  shoulder: measurement.shoulder,
+  sleeveLength: measurement.sleeveLength,
+  blouseLength: measurement.blouseLength,
+  frontNeck: measurement.frontNeck,
+  backNeck: measurement.backNeck,
+  armhole: measurement.armhole,
+  pantLength: measurement.pantLength,
+  notes: measurement.notes,
+});
+
+/* -------------------------------------------------------
+   MAIN SCREEN
 ------------------------------------------------------- */
 
 export default function OrdersScreen({
@@ -336,1021 +467,1918 @@ export default function OrdersScreen({
   orders,
   onCreateOrder,
   onUpdateOrder,
+  onDeleteOrder,
   onBack,
+  openCreateForSelectedCustomer,
+  onCreateFormOpened,
+  onCreateCustomer,
 }: OrdersScreenProps) {
   const [search, setSearch] = useState("");
-  const [showCreateModal, setShowCreateModal] = useState(false);
+
+  const [statusFilter, setStatusFilter] = useState<"All" | OrderStatus>("All");
+
+  const [showForm, setShowForm] = useState(false);
+
+  const [showDetails, setShowDetails] = useState(false);
+
+  const [editingOrder, setEditingOrder] = useState<Order | null>(null);
+
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
 
-  const [customerId, setCustomerId] = useState(
-    selectedCustomer?.id || customers[0]?.id || ""
-  );
-  const [item, setItem] = useState("Blouse");
-  const [measurementId, setMeasurementId] = useState("");
-  const [quantity, setQuantity] = useState("1");
-  const [price, setPrice] = useState("");
-  const [deliveryDate, setDeliveryDate] = useState("");
-  const [status, setStatus] = useState<OrderStatus>("New");
-  const [notes, setNotes] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [showCustomerPicker, setShowCustomerPicker] = useState(false);
-  const [showGarmentPicker, setShowGarmentPicker] = useState(false);
-  const [showStatusPicker, setShowStatusPicker] = useState(false);
+  const [form, setForm] = useState({
+    ...emptyForm,
+  });
 
-  useEffect(() => {
-    if (selectedCustomer?.id) {
-      setCustomerId(selectedCustomer.id);
+  const ordersScrollRef = useRef<ScrollView>(null);
+  const sketchSectionOffset = useRef(0);
+
+  const [sketchPaths, setSketchPaths] = useState<string[]>([]);
+  const [currentSketchPath, setCurrentSketchPath] = useState("");
+  const [sketchTool, setSketchTool] = useState<"pen" | "eraser">("pen");
+  const [fabricPhotos, setFabricPhotos] = useState<string[]>([]);
+  const [savedDesignAssets, setSavedDesignAssets] = useState<
+    OrderDesignAsset[]
+  >([]);
+const [selectedOrderFabricPhotos, setSelectedOrderFabricPhotos] = useState<
+  string[]
+>([]);
+  const [sketchDirty, setSketchDirty] = useState(false);
+  const [designUploadBusy, setDesignUploadBusy] = useState(false);
+
+  const [measurementDraft, setMeasurementDraft] = useState({
+    length: "",
+    shoulder: "",
+    frontNeck: "",
+    backNeck: "",
+    highChest: "",
+    lowChest: "",
+    waist: "",
+    armhole: "",
+    handsLength: "",
+    handsLoose: "",
+  });
+
+  const setMeasurementDraftFromMeasurement = (
+    measurement: Measurement | undefined,
+  ) => {
+    setMeasurementDraft({
+      length: measurement?.blouseLength || "",
+      shoulder: measurement?.shoulder || "",
+      frontNeck: measurement?.frontNeck || "",
+      backNeck: measurement?.backNeck || "",
+      highChest: "",
+      lowChest: "",
+      waist: measurement?.waist || "",
+      armhole: measurement?.armhole || "",
+      handsLength: measurement?.sleeveLength || "",
+      handsLoose: "",
+    });
+  };
+
+  const updateMeasurementDraft = (
+    field: keyof typeof measurementDraft,
+    value: string,
+  ) => {
+    setMeasurementDraft((previous) => ({
+      ...previous,
+      [field]: value,
+    }));
+  };
+
+  const customerOrders = useMemo(() => {
+    if (!selectedCustomer) {
+      return orders;
     }
-  }, [selectedCustomer]);
 
-  const selectedCustomerForForm = useMemo(
-    () => customers.find((customer) => customer.id === customerId) || null,
-    [customers, customerId]
-  );
-
-  const customerMeasurements = useMemo(
-    () => (customerId ? measurements[customerId] || [] : []),
-    [measurements, customerId]
-  );
-
-  const latestMeasurement = useMemo(
-    () => getLatestMeasurement(customerMeasurements),
-    [customerMeasurements]
-  );
-
-  useEffect(() => {
-    if (!measurementId && latestMeasurement) {
-      setMeasurementId(latestMeasurement.id);
-    }
-
-    if (
-      measurementId &&
-      !customerMeasurements.some(
-        (measurement) => measurement.id === measurementId
-      )
-    ) {
-      setMeasurementId(latestMeasurement?.id || "");
-    }
-  }, [customerMeasurements, latestMeasurement, measurementId]);
-
-  const selectedMeasurement = useMemo(
-    () =>
-      customerMeasurements.find(
-        (measurement) => measurement.id === measurementId
-      ) || null,
-    [customerMeasurements, measurementId]
-  );
+    return orders.filter((order) => order.customerId === selectedCustomer.id);
+  }, [orders, selectedCustomer]);
 
   const filteredOrders = useMemo(() => {
     const query = search.trim().toLowerCase();
 
-    if (!query) return orders;
+    return customerOrders.filter((order) => {
+      const matchesStatus =
+        statusFilter === "All" || order.status === statusFilter;
 
-    return orders.filter((order) => {
-      const displayNumber = getOrderDisplayNumber(order).toLowerCase();
-      const customerName = order.customerName?.toLowerCase() || "";
-      const garment = order.item?.toLowerCase() || "";
-      const orderStatus = normalizeStatus(order.status).toLowerCase();
+      const matchesSearch =
+        !query ||
+        order.customerName.toLowerCase().includes(query) ||
+        order.item.toLowerCase().includes(query) ||
+        order.orderNumber?.toLowerCase().includes(query);
 
-      return (
-        displayNumber.includes(query) ||
-        customerName.includes(query) ||
-        garment.includes(query) ||
-        orderStatus.includes(query)
-      );
+      return matchesStatus && matchesSearch;
     });
-  }, [orders, search]);
+  }, [customerOrders, search, statusFilter]);
 
-  const totalOrders = orders.length;
-  const activeOrders = orders.filter(
-    (order) => normalizeStatus(order.status) !== "Delivered"
-  ).length;
-  const readyOrders = orders.filter(
-    (order) => normalizeStatus(order.status) === "Ready"
-  ).length;
+  const stats = useMemo(() => {
+    const total = customerOrders.length;
 
-  function resetCreateForm() {
-    setCustomerId(selectedCustomer?.id || customers[0]?.id || "");
-    setItem("Blouse");
-    setMeasurementId("");
-    setQuantity("1");
-    setPrice("");
-    setDeliveryDate("");
-    setStatus("New");
-    setNotes("");
-    setShowCustomerPicker(false);
-    setShowGarmentPicker(false);
-    setShowStatusPicker(false);
-  }
+    const active = customerOrders.filter(
+      (order) => order.status !== "Delivered",
+    ).length;
 
-  function openCreateModal() {
-    resetCreateForm();
+    const ready = customerOrders.filter(
+      (order) => order.status === "Ready",
+    ).length;
 
+    const delivered = customerOrders.filter(
+      (order) => order.status === "Delivered",
+    ).length;
+
+    const overdue = customerOrders.filter(
+      (order) => getDeliveryInfo(order).shortLabel === "Overdue",
+    ).length;
+
+    const dueToday = customerOrders.filter(
+      (order) => getDeliveryInfo(order).shortLabel === "Due Today",
+    ).length;
+
+    const value = customerOrders.reduce(
+      (sum, order) => sum + orderTotal(order),
+      0,
+    );
+
+    return {
+      total,
+      active,
+      ready,
+      delivered,
+      overdue,
+      dueToday,
+      value,
+    };
+  }, [customerOrders]);
+
+  const customerMeasurements = form.customerId
+    ? measurements[form.customerId] || []
+    : [];
+
+  const openCreateForm = () => {
+    setSketchPaths([]);
+    setCurrentSketchPath("");
+    setFabricPhotos([]);
+    setSavedDesignAssets([]);
+    setSketchDirty(false);
     const defaultCustomer = selectedCustomer?.id || customers[0]?.id || "";
-    const defaultMeasurements = measurements[defaultCustomer] || [];
-    const latest = getLatestMeasurement(defaultMeasurements);
 
-    setCustomerId(defaultCustomer);
-    setMeasurementId(latest?.id || "");
-    setShowCreateModal(true);
-  }
+    const customerMeasurementList = defaultCustomer
+      ? measurements[defaultCustomer] || []
+      : [];
 
-  function handleCustomerChange(nextCustomerId: string) {
-    setCustomerId(nextCustomerId);
+    setEditingOrder(null);
 
-    const nextMeasurements = measurements[nextCustomerId] || [];
-    const latest = getLatestMeasurement(nextMeasurements);
+    setForm({
+      ...emptyForm,
+      customerId: defaultCustomer,
+      measurementId: customerMeasurementList[0]?.id || "",
+      orderDate: toDisplayDate(today()),
+      deliveryDate: "",
+    });
 
-    setMeasurementId(latest?.id || "");
-    setShowCustomerPicker(false);
-  }
+    setMeasurementDraftFromMeasurement(customerMeasurementList[0]);
 
-  async function handleCreate() {
-    if (!customerId) {
+    setShowForm(true);
+  };
+
+  useEffect(() => {
+    if (openCreateForSelectedCustomer && selectedCustomer) {
+      openCreateForm();
+      onCreateFormOpened?.();
+    }
+  }, [openCreateForSelectedCustomer, selectedCustomer?.id]);
+  const openEditForm = async (order: Order) => {
+    setEditingOrder(order);
+
+    setForm({
+      customerId: order.customerId,
+      item: order.item,
+      measurementId: order.measurementId || "",
+      quantity: String(order.quantity || 1),
+      price: String(order.price || ""),
+      orderDate: toDisplayDate(order.orderDate),
+      deliveryDate: toDisplayDate(order.deliveryDate),
+      status: order.status,
+      notes: order.notes || "",
+    });
+
+    const existingMeasurement = (measurements[order.customerId] || []).find(
+      (item) => item.id === order.measurementId,
+    );
+
+    setMeasurementDraftFromMeasurement(existingMeasurement);
+
+    setShowForm(true);
+    setSketchPaths([]);
+    setCurrentSketchPath("");
+    setFabricPhotos([]);
+    setSavedDesignAssets([]);
+    setSketchDirty(false);
+
+    try {
+      const assets = await getOrderDesignAssets(order.id);
+      setSavedDesignAssets(assets);
+
+      const photos = assets
+        .filter(
+          (asset) => asset.asset_type === "fabric_photo" && !!asset.signedUrl,
+        )
+        .map((asset) => asset.signedUrl as string);
+
+      setFabricPhotos(photos);
+
+      const sketches = assets.filter((asset) => asset.asset_type === "sketch");
+
+      if (sketches.length > 0) {
+        const latestSketch = sketches[sketches.length - 1];
+        const paths = await downloadSketchPaths(latestSketch);
+        setSketchPaths(paths);
+      }
+    } catch (error) {
+      console.error("LOAD DESIGN ASSETS ERROR:", error);
+      Alert.alert(
+        "Design Files",
+        "Could not load saved sketches or fabric photos.",
+      );
+    }
+  };
+
+  const closeForm = () => {
+    setShowForm(false);
+    setEditingOrder(null);
+  };
+
+  const updateField = (field: keyof typeof emptyForm, value: string) => {
+    setForm((previous) => ({
+      ...previous,
+      [field]: value,
+    }));
+  };
+
+  const persistMeasurementDraft = async (): Promise<Measurement | null> => {
+    const selectedMeasurement = customerMeasurements.find(
+      (item) => item.id === form.measurementId,
+    );
+
+    const hasInput = Object.values(measurementDraft).some(
+      (value) => value.trim().length > 0,
+    );
+
+    if (!selectedMeasurement && !hasInput) {
+      return null;
+    }
+
+    const payload = {
+      customerId: form.customerId,
+      date: selectedMeasurement?.date || today(),
+      type:
+        selectedMeasurement?.type ||
+        form.item.trim() ||
+        "Custom",
+      bust: selectedMeasurement?.bust || "",
+      waist: measurementDraft.waist,
+      hip: selectedMeasurement?.hip || "",
+      shoulder: measurementDraft.shoulder,
+      sleeveLength: measurementDraft.handsLength,
+      blouseLength: measurementDraft.length,
+      frontNeck: measurementDraft.frontNeck,
+      backNeck: measurementDraft.backNeck,
+      armhole: measurementDraft.armhole,
+      pantLength: selectedMeasurement?.pantLength || "",
+      notes: selectedMeasurement?.notes || "",
+    };
+
+    if (selectedMeasurement) {
+      return updateMeasurement(
+        selectedMeasurement.id,
+        payload,
+      );
+    }
+
+    return createMeasurement(payload);
+  };
+
+  const saveOrder = async () => {
+    if (!form.customerId) {
       Alert.alert("Customer Required", "Please select a customer.");
       return;
     }
 
-    if (!item.trim()) {
-      Alert.alert("Garment Required", "Please select a garment.");
+    if (!form.item.trim()) {
+      Alert.alert("Item Required", "Please enter the item name.");
       return;
     }
 
-    const parsedQuantity = Number(quantity);
-    const parsedPrice = Number(price);
+    const quantity = Number(form.quantity) || 1;
 
-    if (!Number.isFinite(parsedQuantity) || parsedQuantity < 1) {
+    const price = Number(form.price) || 0;
+
+    if (quantity <= 0) {
       Alert.alert("Invalid Quantity", "Quantity must be at least 1.");
       return;
     }
 
-    if (!Number.isFinite(parsedPrice) || parsedPrice < 0) {
-      Alert.alert("Invalid Price", "Please enter a valid price.");
+    if (price < 0) {
+      Alert.alert("Invalid Price", "Price cannot be negative.");
       return;
     }
 
-    if (!deliveryDate.trim()) {
-      Alert.alert("Delivery Date Required", "Please enter a delivery date.");
-      return;
-    }
+    const customer = customers.find((item) => item.id === form.customerId);
 
-    if (!selectedCustomerForForm) {
-      Alert.alert("Customer Required", "Selected customer was not found.");
-      return;
-    }
-
-    const measurement =
-      customerMeasurements.find(
-        (entry) => entry.id === measurementId
-      ) || latestMeasurement;
-
-    const now = new Date();
-    const orderDate = [
-      String(now.getDate()).padStart(2, "0"),
-      String(now.getMonth() + 1).padStart(2, "0"),
-      now.getFullYear(),
-    ].join("/");
-
-    const newOrder: Order = {
-      id: `order-${Date.now()}-${Math.random()
-        .toString(36)
-        .slice(2, 8)}`,
-      orderNumber: `ORD-${String(Date.now()).slice(-6)}`,
-      customerId: selectedCustomerForForm.id,
-      customerName: selectedCustomerForForm.name,
-      item: item.trim(),
-      measurementId: measurement?.id || "",
-      measurementUsed: measurement
-        ? `${measurement.type || "Saved measurement"} • ${getMeasurementDateValue(
-            measurement.date
-          )}`
-        : "No measurement selected",
-      measurementSnapshot: createSnapshot(measurement),
-      quantity: parsedQuantity,
-      price: parsedPrice,
-      orderDate,
-      deliveryDate: deliveryDate.trim(),
-      status: normalizeStatus(status),
-      notes: notes.trim(),
-    };
+    let measurement = customerMeasurements.find(
+      (item) => item.id === form.measurementId,
+    );
 
     try {
-      setSaving(true);
-      const savedOrder = await onCreateOrder(newOrder);
+      const persistedMeasurement = await persistMeasurementDraft();
 
-      setShowCreateModal(false);
-      resetCreateForm();
-      setSelectedOrder(savedOrder);
+      if (persistedMeasurement) {
+        measurement = persistedMeasurement;
+      }
+    } catch (error) {
+      console.error("SAVE MEASUREMENT ERROR:", error);
+      Alert.alert(
+        "Measurement Save Failed",
+        "The order was not saved because the measurement could not be saved.",
+      );
+      return;
+    }
+
+    const orderDate = toDbDate(form.orderDate);
+
+    const deliveryDate = form.deliveryDate.trim()
+      ? toDbDate(form.deliveryDate)
+      : "";
+
+    if (!orderDate) {
+      Alert.alert(
+        "Invalid Order Date",
+        "Please enter a valid date in DD/MM/YYYY format.",
+      );
+      return;
+    }
+
+    if (form.deliveryDate.trim() && !deliveryDate) {
+      Alert.alert(
+        "Invalid Delivery Date",
+        "Please enter a valid date in DD/MM/YYYY format.",
+      );
+      return;
+    }
+
+    if (deliveryDate && deliveryDate < orderDate) {
+      Alert.alert(
+        "Invalid Delivery Date",
+        "Delivery date cannot be before the order date.",
+      );
+      return;
+    }
+
+    const orderData: Order = {
+      id: editingOrder?.id || createId(),
+
+      orderNumber:
+        editingOrder?.orderNumber?.match(/^FF-(\d+)$/i)
+          ? editingOrder.orderNumber.toUpperCase()
+          : `FF-${String(
+              Math.max(
+                0,
+                ...orders
+                  .map((order) => {
+                    const match =
+                      order.orderNumber?.match(/^FF-(\d{3})$/i);
+                    return match ? Number(match[1]) : 0;
+                  }),
+              ) + 1,
+            ).padStart(3, "0")}`,
+
+      customerId: form.customerId,
+
+      customerName: customer?.name || "",
+
+      item: form.item.trim(),
+
+      measurementId: measurement?.id || "",
+
+      measurementUsed: measurement
+        ? `${measurement.type} - ${formatDate(measurement.date)}`
+        : "",
+
+      measurementSnapshot: measurement
+        ? makeSnapshot(measurement)
+        : editingOrder?.measurementSnapshot || null,
+
+      quantity,
+
+      price,
+
+      orderDate,
+
+      deliveryDate,
+
+      status: form.status,
+
+      notes: form.notes.trim(),
+    };
+
+    if (designUploadBusy) {
+      Alert.alert("Please wait", "Design files are being uploaded.");
+      return;
+    }
+
+    setDesignUploadBusy(true);
+
+    let savedOrder: Order;
+
+    try {
+      if (editingOrder) {
+        savedOrder = await onUpdateOrder(orderData);
+      } else {
+        savedOrder = await onCreateOrder(orderData);
+      }
+    } catch (error) {
+      console.error("SAVE ORDER ERROR:", error);
+      setDesignUploadBusy(false);
+      Alert.alert("Save Failed", "Unable to save order.");
+      return;
+    }
+
+    if (!savedOrder?.id) {
+      setDesignUploadBusy(false);
+      Alert.alert(
+        "Order Saved",
+        "The order was saved, but its database ID was not returned. Design files were not uploaded.",
+      );
+      return;
+    }
+
+    try {
+      if (sketchDirty) {
+        await uploadSketchPaths(savedOrder.id, sketchPaths);
+      }
+
+      const newFabricPhotos = fabricPhotos.filter(
+        (uri) => !uri.startsWith("http"),
+      );
+
+      for (const photoUri of newFabricPhotos) {
+        await uploadOrderDesignAsset(savedOrder.id, photoUri, "fabric_photo");
+      }
+
+      const refreshedAssets = await getOrderDesignAssets(savedOrder.id);
+
+      setSavedDesignAssets(refreshedAssets);
+
+      const refreshedFabricPhotos = refreshedAssets
+        .filter(
+          (asset) => asset.asset_type === "fabric_photo" && !!asset.signedUrl,
+        )
+        .map((asset) => asset.signedUrl as string);
+
+      setFabricPhotos(refreshedFabricPhotos);
+      setSketchDirty(false);
+
+      setDesignUploadBusy(false);
+      closeForm();
+    } catch (error) {
+      console.error("DESIGN UPLOAD ERROR:", error);
+      setDesignUploadBusy(false);
 
       Alert.alert(
-        "Order Created",
-        `${getOrderDisplayNumber(savedOrder)} has been created successfully.`
+        "Order Saved",
+        "Your order was saved, but a design file could not be uploaded. The form remains open. Please try again.",
       );
-    } catch {
-      // App.tsx handles the detailed Supabase error.
-    } finally {
-      setSaving(false);
     }
-  }
-
-  async function updateOrderStatus(nextStatus: OrderStatus) {
-    if (!selectedOrder) return;
-
-    const updatedOrder: Order = {
-      ...selectedOrder,
-      status: normalizeStatus(nextStatus),
-    };
+  };
+  const updateOrderStatus = async (order: Order, status: OrderStatus) => {
+    if (order.status === status) {
+      return;
+    }
 
     try {
-      setSaving(true);
-      const savedOrder = await onUpdateOrder(updatedOrder);
-      setSelectedOrder(savedOrder);
-    } catch {
-      // App.tsx handles the error.
-    } finally {
-      setSaving(false);
+      const updated: Order = {
+        ...order,
+        status,
+      };
+
+      await onUpdateOrder(updated);
+
+      setSelectedOrder(updated);
+    } catch (error) {
+      console.error("STATUS UPDATE ERROR:", error);
+
+      Alert.alert("Update Failed", "Unable to update order status.");
     }
-  }
+  };
 
-  function openOrderDetails(order: Order) {
-    setSelectedOrder(order);
-  }
+  const handleDeleteOrder = (order: Order) => {
+    Alert.alert(
+      "Delete Order",
+      `Are you sure you want to delete ${order.orderNumber || "this order"}?`,
+      [
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              await onDeleteOrder(order.id);
 
-  function closeOrderDetails() {
-    if (!saving) {
-      setSelectedOrder(null);
-    }
-  }
+              setShowDetails(false);
+              setSelectedOrder(null);
+            } catch (error) {
+              console.error("DELETE ORDER ERROR:", error);
 
-  function renderStatusTimeline(order: Order) {
-    const current = normalizeStatus(order.status);
-    const currentIndex = WORKFLOW_STATUSES.indexOf(current);
+              if (
+                error instanceof Error &&
+                error.message === "This order has a bill and cannot be deleted."
+              ) {
+                Alert.alert(
+                  "Cannot Delete Order",
+                  "This order already has a bill. Please keep the order because it is linked to billing history.",
+                );
+                return;
+              }
 
-    return (
-      <View style={styles.timeline}>
-        {WORKFLOW_STATUSES.map((step, index) => {
-          const completed = currentIndex >= index;
-          const active = current === step;
-
-          return (
-            <View key={step} style={styles.timelineRow}>
-              <View style={styles.timelineRail}>
-                <View
-                  style={[
-                    styles.timelineDot,
-                    completed && styles.timelineDotCompleted,
-                    active && styles.timelineDotActive,
-                  ]}
-                >
-                  {completed ? (
-                    <Text style={styles.timelineCheck}>✓</Text>
-                  ) : null}
-                </View>
-
-                {index < WORKFLOW_STATUSES.length - 1 && (
-                  <View
-                    style={[
-                      styles.timelineLine,
-                      currentIndex > index && styles.timelineLineCompleted,
-                    ]}
-                  />
-                )}
-              </View>
-
-              <View style={styles.timelineContent}>
-                <Text
-                  style={[
-                    styles.timelineTitle,
-                    active && styles.timelineTitleActive,
-                  ]}
-                >
-                  {step}
-                </Text>
-
-                <Text style={styles.timelineDescription}>
-                  {getStatusDescription(step)}
-                </Text>
-
-                {active && (
-                  <View style={styles.currentStatusLabel}>
-                    <Text style={styles.currentStatusLabelText}>
-                      Current status
-                    </Text>
-                  </View>
-                )}
-              </View>
-            </View>
-          );
-        })}
-      </View>
+              Alert.alert("Delete Failed", "Unable to delete order.");
+            }
+          },
+        },
+      ],
     );
-  }
+  };
 
-  function renderMeasurementSnapshot(snapshot: MeasurementSnapshot | null) {
-    if (!snapshot) {
-      return (
-        <View style={styles.emptyMeasurement}>
-          <Text style={styles.emptyMeasurementIcon}>📏</Text>
-          <Text style={styles.emptyMeasurementTitle}>
-            No measurement snapshot
-          </Text>
-          <Text style={styles.emptyMeasurementText}>
-            This order was created without a saved measurement.
-          </Text>
-        </View>
+  const pickFabricPhoto = async () => {
+    try {
+      const permission =
+        await ImagePicker.requestMediaLibraryPermissionsAsync();
+
+      if (!permission.granted) {
+        Alert.alert(
+          "Permission required",
+          "Please allow photo access to select fabric images.",
+        );
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsMultipleSelection: true,
+        selectionLimit: 5,
+        quality: 0.8,
+      });
+
+      if (!result.canceled) {
+        setFabricPhotos((previous) =>
+          [...previous, ...result.assets.map((asset) => asset.uri)].slice(0, 5),
+        );
+      }
+    } catch {
+      Alert.alert("Error", "Unable to open the photo library.");
+    }
+  };
+
+  const removeFabricPhoto = async (uri: string) => {
+    const asset = savedDesignAssets.find(
+      (item) => item.asset_type === "fabric_photo" && item.signedUrl === uri,
+    );
+
+    if (asset) {
+      try {
+        await deleteOrderDesignAsset(asset);
+
+        setSavedDesignAssets((previous) =>
+          previous.filter((item) => item.id !== asset.id),
+        );
+      } catch (error) {
+        console.error("DELETE FABRIC PHOTO ERROR:", error);
+        Alert.alert(
+          "Delete Failed",
+          "Could not delete the saved fabric photo.",
+        );
+        return;
+      }
+    }
+
+    setFabricPhotos((previous) =>
+      previous.filter((photoUri) => photoUri !== uri),
+    );
+  };
+  const clearSketch = () => {
+    setSketchPaths([]);
+    setCurrentSketchPath("");
+    setSketchDirty(true);
+  };
+
+  const eraseSketchPath = (locationX: number, locationY: number) => {
+    if (sketchPaths.length === 0) {
+      return;
+    }
+
+    const remainingPaths = sketchPaths.filter((path) => {
+      const points = path.match(/-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?/g);
+
+      if (!points) {
+        return true;
+      }
+
+      const touched = points.some((point) => {
+        const [x, y] = point.split(",").map(Number);
+
+        return (
+          Math.abs(x - locationX) <= 22 &&
+          Math.abs(y - locationY) <= 22
+        );
+      });
+
+      return !touched;
+    });
+
+    if (remainingPaths.length !== sketchPaths.length) {
+      setSketchPaths(remainingPaths);
+      setSketchDirty(true);
+    }
+  };
+
+  const sketchCanvasRef = useRef<View>(null);
+  const [enhancedSketchUri, setEnhancedSketchUri] = useState("");
+
+  const enhanceSketch = async () => {
+    if (sketchPaths.length === 0 && !currentSketchPath) {
+      Alert.alert(
+        "No Sketch",
+        "Please draw your garment design first.",
+      );
+      return;
+    }
+
+    try {
+      if (!sketchCanvasRef.current) {
+        Alert.alert(
+          "Capture Failed",
+          "The sketch canvas is not ready yet.",
+        );
+        return;
+      }
+
+      const capturedUri = await captureRef(sketchCanvasRef, {
+        format: "png",
+        quality: 1,
+        result: "tmpfile",
+      });
+
+      setEnhancedSketchUri(capturedUri);
+
+      const capturedFile = new File(capturedUri);
+      const imageBase64 = await capturedFile.base64();
+
+      const { data, error } = await supabase.functions.invoke(
+        "enhance-sketch",
+        {
+          body: {
+            imageData: imageBase64,
+          },
+        },
+      );
+
+      if (error) {
+        console.error("ENHANCE FUNCTION ERROR:", error);
+
+        Alert.alert(
+          "AI Enhance",
+          "The sketch was captured, but the enhancement service could not be reached.",
+        );
+
+        return;
+      }
+
+      console.log("ENHANCE FUNCTION RESPONSE:", data);
+
+      Alert.alert(
+        "Sketch Sent",
+        data?.message ||
+          "The sketch was successfully sent to the enhancement service.",
+      );
+    } catch (error) {
+      console.error("AI ENHANCE ERROR:", error);
+
+      Alert.alert(
+        "AI Enhance",
+        "The sketch was captured, but it could not be sent for enhancement.",
       );
     }
-
-    return (
-      <View style={styles.measurementCard}>
-        <View style={styles.measurementHeader}>
-          <View>
-            <Text style={styles.measurementTitle}>
-              {snapshot.type || "Saved Measurement"}
-            </Text>
-            <Text style={styles.measurementDate}>
-              {getMeasurementDateValue(snapshot.date)}
-            </Text>
-          </View>
-
-          <View style={styles.snapshotBadge}>
-            <Text style={styles.snapshotBadgeText}>Snapshot</Text>
-          </View>
-        </View>
-
-        <View style={styles.measurementGrid}>
-          <MeasurementValue label="Bust" value={snapshot.bust} />
-          <MeasurementValue label="Waist" value={snapshot.waist} />
-          <MeasurementValue label="Hip" value={snapshot.hip} />
-          <MeasurementValue label="Shoulder" value={snapshot.shoulder} />
-          <MeasurementValue
-            label="Sleeve"
-            value={snapshot.sleeveLength}
-          />
-          <MeasurementValue
-            label="Blouse"
-            value={snapshot.blouseLength}
-          />
-          <MeasurementValue
-            label="Front Neck"
-            value={snapshot.frontNeck}
-          />
-          <MeasurementValue label="Back Neck" value={snapshot.backNeck} />
-          <MeasurementValue label="Armhole" value={snapshot.armhole} />
-          <MeasurementValue
-            label="Pant Length"
-            value={snapshot.pantLength}
-          />
-        </View>
-
-        {!!snapshot.notes && (
-          <View style={styles.measurementNotes}>
-            <Text style={styles.measurementNotesLabel}>Notes</Text>
-            <Text style={styles.measurementNotesText}>
-              {snapshot.notes}
-            </Text>
-          </View>
-        )}
-      </View>
-    );
-  }
-
+  };
   return (
-    <View style={styles.screen}>
-      {/* HEADER */}
-      <View style={styles.header}>
-        <View style={styles.headerTopRow}>
-          <TouchableOpacity onPress={onBack} style={styles.headerBack}>
-            <Text style={styles.headerBackText}>←</Text>
-          </TouchableOpacity>
-
-          <View style={styles.headerTextBlock}>
-            <Text style={styles.headerTitle}>Orders</Text>
-            <Text style={styles.headerSubtitle}>
-              New → Measurement → Cutting → Stitching → Trial → Ready → Delivered
-            </Text>
-          </View>
-
-          <TouchableOpacity
-            style={styles.newOrderButton}
-            onPress={openCreateModal}
-            activeOpacity={0.85}
-          >
-            <Text style={styles.newOrderButtonText}>＋</Text>
-            <Text style={styles.newOrderButtonLabel}>New</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {/* SUMMARY */}
-      <View style={styles.summaryRow}>
-        <SummaryPill label="Total" value={String(totalOrders)} />
-        <SummaryPill label="Active" value={String(activeOrders)} />
-        <SummaryPill label="Ready" value={String(readyOrders)} />
-      </View>
-
-      {/* SEARCH */}
-      <View style={styles.searchWrap}>
-        <Text style={styles.searchIcon}>⌕</Text>
-        <TextInput
-          value={search}
-          onChangeText={setSearch}
-          placeholder="Search order, customer, garment..."
-          placeholderTextColor="#A59BA1"
-          style={styles.searchInput}
-          autoCapitalize="none"
-        />
-        {search.length > 0 && (
-          <TouchableOpacity onPress={() => setSearch("")}>
-            <Text style={styles.clearSearch}>×</Text>
-          </TouchableOpacity>
-        )}
-      </View>
-
-      {/* ORDER LIST */}
+    <View style={styles.container}>
       <ScrollView
-        contentContainerStyle={styles.listContent}
+        ref={ordersScrollRef}
+        contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {filteredOrders.length === 0 ? (
-          <View style={styles.emptyState}>
-            <View style={styles.emptyIconCircle}>
-              <Text style={styles.emptyIcon}>🧵</Text>
+        {/* HEADER */}
+        <View style={styles.header}>
+          <TouchableOpacity style={styles.backButton} onPress={onBack}>
+  <MaterialCommunityIcons
+    name="chevron-left"
+    size={30}
+    color={colors.PrimaryWine}
+  />
+</TouchableOpacity>
+
+          <View style={styles.headerText}>
+            <Text style={styles.brand}>FEMME FATALE BOUTIQUE</Text>
+
+            <Text style={styles.title}>Orders</Text>
+
+            <Text style={styles.subtitle}>
+              {selectedCustomer
+                ? selectedCustomer.name
+                : "Manage boutique orders"}
+            </Text>
+          </View>
+
+          <TouchableOpacity style={styles.addButton} onPress={openCreateForm}>
+            <Text style={styles.addButtonText}>+ New</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* SUMMARY */}
+        <View style={styles.summaryRow}>
+          <SummaryCard label="Total" value={String(stats.total)} />
+
+          <SummaryCard label="Active" value={String(stats.active)} />
+
+          <SummaryCard label="Ready" value={String(stats.ready)} />
+
+          <SummaryCard label="Delivered" value={String(stats.delivered)} />
+        </View>
+
+        {/* DELIVERY ALERT */}
+        {(stats.overdue > 0 || stats.dueToday > 0) && (
+          <View style={styles.alertSummaryCard}>
+            <View style={styles.alertSummaryIcon}>
+              <Text style={styles.alertIconText}>!</Text>
             </View>
 
-            <Text style={styles.emptyTitle}>
-              {search ? "No orders found" : "No orders yet"}
+            <View style={styles.alertSummaryText}>
+              <Text style={styles.alertSummaryTitle}>Delivery Attention</Text>
+
+              <Text style={styles.alertSummarySubtitle}>
+                {stats.overdue > 0
+                  ? `${stats.overdue} overdue order${
+                      stats.overdue === 1 ? "" : "s"
+                    }`
+                  : ""}
+
+                {stats.overdue > 0 && stats.dueToday > 0 ? "" : ""}
+
+                {stats.dueToday > 0 ? `${stats.dueToday} due today` : ""}
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {/* VALUE */}
+        <View style={styles.valueCard}>
+          <View>
+            <Text style={styles.valueLabel}>ORDER VALUE</Text>
+
+            <Text style={styles.valueAmount}>{money(stats.value)}</Text>
+          </View>
+
+          <Text style={styles.valueIcon}>{"\u20B9"}</Text>
+        </View>
+
+        {/* SEARCH */}
+        <View style={styles.searchBox}>
+          <Text style={styles.searchIcon}>{"\u{1F50D}"}</Text>
+
+          <TextInput
+            value={search}
+            onChangeText={setSearch}
+            placeholder="Search orders..."
+            placeholderTextColor="#999"
+            style={styles.searchInput}
+          />
+
+          {search.length > 0 && (
+            <TouchableOpacity onPress={() => setSearch("")}>
+              <Text style={styles.clearText}>×</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {/* FILTER */}
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.filterRow}
+        >
+          <TouchableOpacity
+            style={[
+              styles.filterChip,
+              statusFilter === "All" && styles.filterChipActive,
+            ]}
+            onPress={() => setStatusFilter("All")}
+          >
+            <Text
+              style={[
+                styles.filterChipText,
+                statusFilter === "All" && styles.filterChipTextActive,
+              ]}
+            >
+              All
             </Text>
+          </TouchableOpacity>
+
+          {STATUS_LIST.map((status) => (
+            <TouchableOpacity
+              key={status}
+              style={[
+                styles.filterChip,
+                statusFilter === status && styles.filterChipActive,
+              ]}
+              onPress={() => setStatusFilter(status)}
+            >
+              <Text
+                style={[
+                  styles.filterChipText,
+                  statusFilter === status && styles.filterChipTextActive,
+                ]}
+              >
+                {status}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
+
+        {/* ORDER LIST */}
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>
+            {selectedCustomer ? "Customer Orders" : "All Orders"}
+          </Text>
+
+          <Text style={styles.sectionCount}>{filteredOrders.length}</Text>
+        </View>
+
+        {filteredOrders.length === 0 ? (
+          <View style={styles.emptyCard}>
+            <Text style={styles.emptyIcon}>
+              {"\u{1F9F5}"}
+            </Text>
+
+            <Text style={styles.emptyTitle}>No orders found</Text>
 
             <Text style={styles.emptyText}>
-              {search
-                ? "Try a different search term."
-                : "Create your first tailoring order to start tracking work."}
+              Create a new boutique order to get started.
             </Text>
 
-            {!search && (
-              <TouchableOpacity
-                style={styles.emptyAction}
-                onPress={openCreateModal}
-              >
-                <Text style={styles.emptyActionText}>Create First Order</Text>
-              </TouchableOpacity>
-            )}
+            <TouchableOpacity
+              style={styles.emptyButton}
+              onPress={openCreateForm}
+            >
+              <Text style={styles.emptyButtonText}>+ Create Order</Text>
+            </TouchableOpacity>
           </View>
         ) : (
-          filteredOrders.map((order, index) => {
-            const total = Number(order.price || 0) * Number(order.quantity || 0);
-            const normalized = normalizeStatus(order.status);
-            const statusColors = getStatusStyle(normalized);
+          filteredOrders.map((order) => {
+            const deliveryInfo = getDeliveryInfo(order);
+
+            const progress = progressPercent(order.status);
 
             return (
               <TouchableOpacity
                 key={order.id}
                 style={styles.orderCard}
-                onPress={() => openOrderDetails(order)}
-                activeOpacity={0.88}
+                activeOpacity={0.9}
+                onPress={async () => {
+  setSelectedOrder(order);
+  setShowDetails(true);
+
+  try {
+    const assets = await getOrderDesignAssets(order.id);
+
+    const photos = assets
+      .filter((asset) => asset.asset_type === "fabric_photo")
+      .map((asset) => asset.signedUrl)
+      .filter((url): url is string => Boolean(url));
+
+    setSelectedOrderFabricPhotos(photos);
+  } catch (error) {
+    console.error("LOAD ORDER FABRIC PHOTOS ERROR:", error);
+    setSelectedOrderFabricPhotos([]);
+  }
+}}
               >
                 <View style={styles.orderCardTop}>
-                  <View style={styles.orderNumberBlock}>
-                    <Text style={styles.orderNumber}>
-                      {getOrderDisplayNumber(order, index)}
-                    </Text>
-                    <Text style={styles.orderCustomer}>
-                      {order.customerName || "Customer"}
-                    </Text>
+                  <View style={styles.orderIdentity}>
+                    <View style={styles.customerInitialBadge}>
+                      {order.customerName?.trim() ? (
+                        <Text style={styles.customerInitialText}>
+                          {order.customerName.trim().charAt(0).toUpperCase()}
+                        </Text>
+                      ) : (
+                        <MaterialCommunityIcons
+                          name="account-outline"
+                          size={20}
+                          color={colors.PrimaryWine}
+                        />
+                      )}
+                    </View>
+
+                    <View style={styles.orderNumberBox}>
+                      <Text style={styles.orderNumber} numberOfLines={1}>
+                        {order.orderNumber || "FF-001"}
+                      </Text>
+
+                      <Text style={styles.orderDate}>
+                        {formatDate(order.orderDate)}
+                      </Text>
+                    </View>
                   </View>
 
-                  <StatusBadge status={normalized} />
+                  <StatusBadge status={order.status} />
                 </View>
 
-                <View style={styles.orderDivider} />
-
-                <View style={styles.orderMainRow}>
-                  <View style={styles.garmentIcon}>
-                    <Text style={styles.garmentIconText}>✂</Text>
+                <View style={styles.orderMain}>
+                  <View style={styles.itemIcon}>
+                    <MaterialCommunityIcons
+                      name="tshirt-crew"
+                      size={26}
+                      color={colors.PrimaryWine}
+                    />
                   </View>
 
-                  <View style={styles.orderInfo}>
-                    <Text style={styles.orderItem}>{order.item}</Text>
-                    <Text style={styles.orderMeta}>
-                      Qty {order.quantity || 1} • Delivery {order.deliveryDate}
-                    </Text>
-                  </View>
+                  <View style={styles.itemInfo}>
+                    <Text style={styles.itemName}>{order.item}</Text>
 
-                  <View style={styles.orderPriceBlock}>
-                    <Text style={styles.orderTotal}>
-                      {formatCurrency(total)}
+                    <Text style={styles.customerText}>
+                      {order.customerName}
                     </Text>
-                    <Text style={styles.orderUnitPrice}>
-                      {formatCurrency(order.price)} / item
-                    </Text>
+
+                    {order.measurementUsed ? (
+                      <Text style={styles.measurementText}>
+                        " {order.measurementUsed}
+                      </Text>
+                    ) : null}
                   </View>
                 </View>
 
-                <View style={styles.orderFooter}>
-                  <View style={styles.measurementIndicator}>
-                    <Text style={styles.measurementIndicatorIcon}>
-                      {order.measurementSnapshot ? "📏" : "○"}
-                    </Text>
-                    <Text
-                      style={[
-                        styles.measurementIndicatorText,
-                        !order.measurementSnapshot &&
-                          styles.measurementIndicatorMuted,
-                      ]}
-                    >
-                      {order.measurementSnapshot
-                        ? "Measurement saved"
-                        : "No measurement"}
-                    </Text>
-                  </View>
-
-                  <Text
-                    style={[
-                      styles.orderStatusHint,
-                      { color: statusColors.textColor },
-                    ]}
-                  >
-                    {normalized} →
-                  </Text>
-                </View>
               </TouchableOpacity>
             );
           })
         )}
       </ScrollView>
 
-      {/* CREATE ORDER MODAL */}
+      {/* CREATE / EDIT MODAL */}
       <Modal
-        visible={showCreateModal}
+        visible={showForm}
         transparent
         animationType="slide"
-        onRequestClose={() => {
-          if (!saving) setShowCreateModal(false);
-        }}
+        onRequestClose={closeForm}
       >
-        <KeyboardAvoidingView
-          style={styles.modalOverlay}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
-        >
-          <View style={styles.modalCard}>
+        <View style={styles.overlay}>
+          <View style={styles.formModal}>
             <View style={styles.modalHeader}>
-              <View>
-                <Text style={styles.modalTitle}>Create New Order</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitle}>
+                  {editingOrder ? "Edit Order" : "New Order"}
+                </Text>
+
                 <Text style={styles.modalSubtitle}>
-                  Add tailoring details and delivery information
+                  {editingOrder
+                    ? editingOrder.orderNumber
+                    : "Create boutique order"}
                 </Text>
               </View>
 
-              <TouchableOpacity
-                onPress={() => setShowCreateModal(false)}
-                disabled={saving}
-                style={styles.modalClose}
-              >
-                <Text style={styles.modalCloseText}>×</Text>
+              <TouchableOpacity style={styles.closeButton} onPress={closeForm}>
+                <Text style={styles.closeText}>X</Text>
               </TouchableOpacity>
             </View>
 
             <ScrollView
-              contentContainerStyle={styles.formContent}
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
             >
-              <FieldLabel>Customer *</FieldLabel>
-
-              <TouchableOpacity
-                style={styles.selectInput}
-                onPress={() => setShowCustomerPicker((value) => !value)}
-                disabled={saving}
+              <View
+                style={{
+                  paddingHorizontal: 2,
+                  paddingTop: 4,
+                  paddingBottom: 18,
+                }}
               >
                 <Text
-                  style={[
-                    styles.selectInputText,
-                    !selectedCustomerForForm &&
-                      styles.selectInputPlaceholder,
-                  ]}
+                  style={{
+                    fontSize: 22,
+                    fontWeight: "900",
+                    color: colors.DarkText,
+                    letterSpacing: -0.3,
+                  }}
                 >
-                  {selectedCustomerForForm?.name || "Select customer"}
+                  Femme Fatale Boutique
                 </Text>
-                <Text style={styles.selectArrow}>
-                  {showCustomerPicker ? "▲" : "▼"}
+
+                <Text
+                  style={{
+                    marginTop: 3,
+                    fontSize: 12,
+                    color: colors.PrimaryWine,
+                    fontWeight: "700",
+                  }}
+                >
+                  Style Speaks Louder ♡
                 </Text>
-              </TouchableOpacity>
 
-              {showCustomerPicker && (
-                <View style={styles.pickerPanel}>
-                  {customers.length === 0 ? (
-                    <Text style={styles.pickerEmpty}>
-                      No customers available.
-                    </Text>
-                  ) : (
-                    customers.map((customer) => (
-                      <TouchableOpacity
-                        key={customer.id}
-                        style={styles.pickerOption}
-                        onPress={() => handleCustomerChange(customer.id)}
-                      >
-                        <View>
-                          <Text style={styles.pickerOptionTitle}>
-                            {customer.name}
-                          </Text>
-                          <Text style={styles.pickerOptionSub}>
-                            {customer.phone || "No phone"}
-                          </Text>
-                        </View>
+                <View
+                  style={{
+                    marginTop: 18,
+                    padding: 15,
+                    borderRadius: 18,
+                    backgroundColor: "#FFF8FB",
+                    borderWidth: 1,
+                    borderColor: "#F8BBD0",
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontSize: 11,
+                      color: "#9B647A",
+                      fontWeight: "800",
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    Order
+                  </Text>
 
-                        {customer.id === customerId && (
-                          <Text style={styles.pickerCheck}>✓</Text>
-                        )}
-                      </TouchableOpacity>
-                    ))
-                  )}
+                  <Text
+                    style={{
+                      marginTop: 4,
+                      fontSize: 18,
+                      color: colors.DarkText,
+                      fontWeight: "900",
+                    }}
+                  >
+                    {editingOrder?.orderNumber?.match(/^FF-(\d+)$/i)
+                      ? `#${editingOrder.orderNumber.toUpperCase()}`
+                      : `#FF-${String(
+                          Math.max(
+                            0,
+                            ...orders.map((order) => {
+                              const match =
+                                order.orderNumber?.match(/^FF-(\d{3})$/i);
+
+                              return match ? Number(match[1]) : 0;
+                            }),
+                          ) + 1,
+                        ).padStart(3, "0")}`}
+                  </Text>
+
+                  <Text
+                    style={{
+                      marginTop: 10,
+                      fontSize: 16,
+                      color: colors.DarkText,
+                      fontWeight: "800",
+                    }}
+                  >
+                    {customers.find(
+                      (customer) => customer.id === form.customerId,
+                    )?.name || "Select Customer"}
+                  </Text>
+
+                  <Text
+                    style={{
+                      marginTop: 3,
+                      fontSize: 13,
+                      color: "#8F4564",
+                      fontWeight: "600",
+                    }}
+                  >
+                    {customers.find(
+                      (customer) => customer.id === form.customerId,
+                    )?.phone || ""}
+                  </Text>
                 </View>
-              )}
 
-              <FieldLabel>Garment *</FieldLabel>
-
-              <TouchableOpacity
-                style={styles.selectInput}
-                onPress={() => setShowGarmentPicker((value) => !value)}
-                disabled={saving}
-              >
-                <Text style={styles.selectInputText}>{item}</Text>
-                <Text style={styles.selectArrow}>
-                  {showGarmentPicker ? "▲" : "▼"}
+                <Text style={styles.formSectionTitle}>
+                  Select Garment Type
                 </Text>
-              </TouchableOpacity>
 
-              {showGarmentPicker && (
-                <View style={styles.pickerPanel}>
-                  {GARMENT_TYPES.map((garment) => (
+                <View
+                  style={{
+                    flexDirection: "row",
+                    flexWrap: "wrap",
+                    gap: 9,
+                  }}
+                >
+                  {[
+                    ["👚", "Blouse"],
+                    ["👗", "Gagra / Lehenga"],
+                    ["🥻", "Saree Care"],
+                    ["👘", "Salwar Suit"],
+                  ].map(([icon, garment]) => (
                     <TouchableOpacity
                       key={garment}
-                      style={styles.pickerOption}
-                      onPress={() => {
-                        setItem(garment);
-                        setShowGarmentPicker(false);
+                      style={{
+                        width: "48%",
+                        minHeight: 76,
+                        paddingHorizontal: 12,
+                        paddingVertical: 12,
+                        borderRadius: 16,
+                        backgroundColor:
+                          form.item === garment
+                            ? colors.PrimaryWine
+                            : "#FFF8FB",
+                        borderWidth: 1,
+                        borderColor:
+                          form.item === garment
+                            ? colors.PrimaryWine
+                            : "#F0C3D5",
+                        justifyContent: "center",
                       }}
+                      onPress={() => updateField("item", garment)}
                     >
-                      <Text style={styles.pickerOptionTitle}>{garment}</Text>
-                      {item === garment && (
-                        <Text style={styles.pickerCheck}>✓</Text>
-                      )}
+                      <Text
+                        style={{
+                          fontSize: 22,
+                          marginBottom: 5,
+                        }}
+                      >
+                        {icon}
+                      </Text>
+
+                      <Text
+                        style={{
+                          fontSize: 12,
+                          fontWeight: "800",
+                          color:
+                            form.item === garment
+                              ? "#FFFFFF"
+                              : colors.DarkText,
+                        }}
+                      >
+                        {garment}
+                      </Text>
                     </TouchableOpacity>
                   ))}
                 </View>
-              )}
 
-              <FieldLabel>Measurement</FieldLabel>
+                <Text style={styles.formSectionTitle}>
+                  Measurements (inches)
+                </Text>
 
-              {customerMeasurements.length === 0 ? (
-                <View style={styles.noMeasurementBox}>
-                  <Text style={styles.noMeasurementTitle}>
-                    No saved measurement
-                  </Text>
-                  <Text style={styles.noMeasurementText}>
-                    You can create the order now and add measurements later.
-                  </Text>
-                </View>
-              ) : (
-                <View style={styles.measurementSelectList}>
-                  {customerMeasurements.map((measurement) => {
-                    const active = measurement.id === measurementId;
+                <Text
+                  style={{
+                    fontSize: 12,
+                    lineHeight: 18,
+                    color: "#8F4564",
+                    marginBottom: 13,
+                  }}
+                >
+                  Auto-filled from saved customer profile where available —
+                  supported measurement edits are saved permanently.
+                </Text>
 
-                    return (
+                {customerMeasurements.length > 0 ? (
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={{
+                      gap: 8,
+                      paddingBottom: 12,
+                    }}
+                  >
+                    {customerMeasurements.map((measurement) => (
                       <TouchableOpacity
                         key={measurement.id}
-                        style={[
-                          styles.measurementOption,
-                          active && styles.measurementOptionActive,
-                        ]}
-                        onPress={() => setMeasurementId(measurement.id)}
+                        onPress={() => {
+                          updateField("measurementId", measurement.id);
+                          setMeasurementDraftFromMeasurement(measurement);
+                        }}
+                        style={{
+                          paddingHorizontal: 13,
+                          paddingVertical: 9,
+                          borderRadius: 20,
+                          backgroundColor:
+                            form.measurementId === measurement.id
+                              ? colors.PrimaryWine
+                              : "#FFF8FB",
+                          borderWidth: 1,
+                          borderColor:
+                            form.measurementId === measurement.id
+                              ? colors.PrimaryWine
+                              : "#F0C3D5",
+                        }}
                       >
-                        <View style={styles.measurementOptionRadio}>
-                          {active && (
-                            <View style={styles.measurementOptionRadioInner} />
-                          )}
-                        </View>
-
-                        <View style={styles.measurementOptionInfo}>
-                          <Text style={styles.measurementOptionTitle}>
-                            {measurement.type || "Measurement"}
-                          </Text>
-                          <Text style={styles.measurementOptionDate}>
-                            {getMeasurementDateValue(measurement.date)}
-                          </Text>
-                        </View>
-
-                        {measurement.id === latestMeasurement?.id && (
-                          <View style={styles.latestBadge}>
-                            <Text style={styles.latestBadgeText}>Latest</Text>
-                          </View>
-                        )}
+                        <Text
+                          style={{
+                            fontSize: 11,
+                            fontWeight: "800",
+                            color:
+                              form.measurementId === measurement.id
+                                ? "#FFFFFF"
+                                : colors.DarkText,
+                          }}
+                        >
+                          {measurement.type}
+                        </Text>
                       </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              )}
-
-              <View style={styles.formTwoColumns}>
-                <View style={styles.formColumn}>
-                  <FieldLabel>Quantity *</FieldLabel>
-                  <TextInput
-                    value={quantity}
-                    onChangeText={setQuantity}
-                    keyboardType="number-pad"
-                    style={styles.textInput}
-                    placeholder="1"
-                    placeholderTextColor="#A59BA1"
-                    editable={!saving}
-                  />
-                </View>
-
-                <View style={styles.formColumn}>
-                  <FieldLabel>Price / item *</FieldLabel>
-                  <TextInput
-                    value={price}
-                    onChangeText={setPrice}
-                    keyboardType="decimal-pad"
-                    style={styles.textInput}
-                    placeholder="0"
-                    placeholderTextColor="#A59BA1"
-                    editable={!saving}
-                  />
-                </View>
-              </View>
-
-              <View style={styles.formTwoColumns}>
-                <View style={styles.formColumn}>
-                  <FieldLabel>Delivery Date *</FieldLabel>
-                  <TextInput
-                    value={deliveryDate}
-                    onChangeText={setDeliveryDate}
-                    style={styles.textInput}
-                    placeholder="DD/MM/YYYY"
-                    placeholderTextColor="#A59BA1"
-                    editable={!saving}
-                  />
-                </View>
-
-                <View style={styles.formColumn}>
-                  <FieldLabel>Initial Status</FieldLabel>
-
-                  <TouchableOpacity
-                    style={styles.selectInput}
-                    onPress={() =>
-                      setShowStatusPicker((value) => !value)
-                    }
-                    disabled={saving}
-                  >
-                    <Text style={styles.selectInputText}>{status}</Text>
-                    <Text style={styles.selectArrow}>
-                      {showStatusPicker ? "▲" : "▼"}
+                    ))}
+                  </ScrollView>
+                ) : (
+                  <View style={styles.noMeasurementBox}>
+                    <Text style={styles.noMeasurementText}>
+                      No saved measurements. Enter the values below and they
+                      will be saved with this customer.
                     </Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
+                  </View>
+                )}
 
-              {showStatusPicker && (
-                <View style={styles.pickerPanel}>
-                  {WORKFLOW_STATUSES.map((workflowStatus) => (
-                    <TouchableOpacity
-                      key={workflowStatus}
-                      style={styles.pickerOption}
-                      onPress={() => {
-                        setStatus(workflowStatus);
-                        setShowStatusPicker(false);
+                <View
+                  style={{
+                    flexDirection: "row",
+                    flexWrap: "wrap",
+                    marginHorizontal: -4,
+                  }}
+                >
+                  {[
+                    ["length", "Length"],
+                    ["shoulder", "Shoulder"],
+                    ["frontNeck", "Front Neck"],
+                    ["backNeck", "Back Neck"],
+                    ["highChest", "High Chest"],
+                    ["lowChest", "Low Chest"],
+                    ["waist", "Waist"],
+                    ["armhole", "Armhole"],
+                    ["handsLength", "Hands Length"],
+                    ["handsLoose", "Hands Loose"],
+                  ].map(([field, label]) => (
+                    <View
+                      key={field}
+                      style={{
+                        width: "50%",
+                        paddingHorizontal: 4,
+                        marginBottom: 13,
                       }}
                     >
-                      <Text style={styles.pickerOptionTitle}>
-                        {workflowStatus}
+                      <Text
+                        style={{
+                          fontSize: 10,
+                          fontWeight: "800",
+                          color: "#8F4564",
+                          marginBottom: 6,
+                        }}
+                      >
+                        {label}
                       </Text>
-                      {status === workflowStatus && (
-                        <Text style={styles.pickerCheck}>✓</Text>
-                      )}
-                    </TouchableOpacity>
+
+                      <TextInput
+                        value={
+                          measurementDraft[
+                            field as keyof typeof measurementDraft
+                          ]
+                        }
+                        onChangeText={(value) =>
+                          updateMeasurementDraft(
+                            field as keyof typeof measurementDraft,
+                            value,
+                          )
+                        }
+                        placeholder="—"
+                        placeholderTextColor="#B99AAA"
+                        keyboardType="decimal-pad"
+                        style={{
+                          height: 46,
+                          borderWidth: 1,
+                          borderColor: "#F0C3D5",
+                          borderRadius: 12,
+                          paddingHorizontal: 12,
+                          backgroundColor: "#FFFFFF",
+                          color: colors.DarkText,
+                          fontSize: 14,
+                          fontWeight: "700",
+                        }}
+                      />
+                    </View>
                   ))}
                 </View>
-              )}
 
-              <FieldLabel>Notes</FieldLabel>
+                <TouchableOpacity
+                  style={{
+                    marginTop: 3,
+                    minHeight: 58,
+                    borderRadius: 15,
+                    borderWidth: 1,
+                    borderColor: "#F0C3D5",
+                    backgroundColor: "#FFF8FB",
+                    flexDirection: "row",
+                    alignItems: "center",
+                    paddingHorizontal: 15,
+                  }}
+                  onPress={() => {
+                    Alert.alert(
+                      "Snap Paper Note",
+                      "Paper-note AI Auto-Fill can be connected to an OCR/image-processing service. Your manual measurements remain available.",
+                    );
+                  }}
+                >
+                  <MaterialCommunityIcons
+                    name="camera-outline"
+                    size={24}
+                    color={colors.PrimaryWine}
+                  />
+
+                  <View style={{ flex: 1, marginLeft: 11 }}>
+                    <Text
+                      style={{
+                        color: colors.DarkText,
+                        fontSize: 13,
+                        fontWeight: "900",
+                      }}
+                    >
+                      Snap Paper Note (AI Auto-Fill)
+                    </Text>
+
+                    <Text
+                      style={{
+                        marginTop: 2,
+                        color: "#9B647A",
+                        fontSize: 10,
+                      }}
+                    >
+                      Scan a handwritten measurement note
+                    </Text>
+                  </View>
+
+                  <MaterialCommunityIcons
+                    name="chevron-right"
+                    size={22}
+                    color={colors.PrimaryWine}
+                  />
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={{
+                    marginTop: 16,
+                    minHeight: 52,
+                    borderRadius: 14,
+                    backgroundColor: colors.PrimaryWine,
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flexDirection: "row",
+                  }}
+                  onPress={async () => {
+                    try {
+                      await persistMeasurementDraft();
+
+                      Alert.alert(
+                        "Measurements Saved",
+                        "Your measurement changes have been saved permanently.",
+                        [
+                          {
+                            text: "Continue",
+                            onPress: () => {
+                              requestAnimationFrame(() => {
+                                ordersScrollRef.current?.scrollTo({
+                                  y: Math.max(
+                                    0,
+                                    sketchSectionOffset.current - 12,
+                                  ),
+                                  animated: true,
+                                });
+                              });
+                            },
+                          },
+                        ],
+                      );
+                    } catch (error) {
+                      console.error(
+                        "MEASUREMENT CONTINUE SAVE ERROR:",
+                        error,
+                      );
+
+                      Alert.alert(
+                        "Save Failed",
+                        "Unable to save the measurement changes.",
+                      );
+                    }
+                  }}
+                >
+                  <Text
+                    style={{
+                      color: "#FFFFFF",
+                      fontSize: 13,
+                      fontWeight: "900",
+                    }}
+                  >
+                    Continue to Sketch & Fabric
+                  </Text>
+
+                  <MaterialCommunityIcons
+                    name="arrow-right"
+                    size={19}
+                    color="#FFFFFF"
+                    style={{ marginLeft: 8 }}
+                  />
+                </TouchableOpacity>
+              </View>
+
+              {/* SKETCH AND FABRIC REFERENCE */}
+              <View
+  style={styles.sketchSection}
+  onLayout={(event) => {
+    sketchSectionOffset.current = event.nativeEvent.layout.y;
+  }}
+>
+                <Text style={styles.fieldLabel}>Design Sketch</Text>
+
+                <View style={styles.sketchToolbar}>
+                  <TouchableOpacity
+                    style={[
+                      styles.sketchToolButton,
+                      sketchTool === "pen" && styles.sketchToolButtonActive,
+                    ]}
+                    onPress={() => setSketchTool("pen")}
+                  >
+                    <Text style={styles.sketchToolText}>Pen</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[
+                      styles.sketchToolButton,
+                      sketchTool === "eraser" && styles.sketchToolButtonActive,
+                    ]}
+                    onPress={() => setSketchTool("eraser")}
+                  >
+                    <Text style={styles.sketchToolText}>Eraser</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.sketchToolButton}
+                    onPress={clearSketch}
+                  >
+                    <Text style={styles.sketchToolText}>Clear</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.sketchToolButton}
+                    onPress={enhanceSketch}
+                  >
+                    <Text style={styles.sketchToolText}>AI Enhance</Text>
+                  </TouchableOpacity>
+                </View>
+
+                <View
+                  ref={sketchCanvasRef}
+                  style={styles.sketchCanvas}
+                  onStartShouldSetResponder={() => true}
+                  onMoveShouldSetResponder={() => true}
+                  onResponderGrant={(event) => {
+                    const { locationX, locationY } = event.nativeEvent;
+
+                    if (sketchTool === "eraser") {
+                      eraseSketchPath(locationX, locationY);
+                      return;
+                    }
+
+                    setCurrentSketchPath(`M${locationX},${locationY}`);
+                  }}
+                  onResponderMove={(event) => {
+                    const { locationX, locationY } = event.nativeEvent;
+
+                    if (sketchTool === "eraser") {
+                      eraseSketchPath(locationX, locationY);
+                      return;
+                    }
+
+                    setCurrentSketchPath(
+                      (previous) => `${previous} L${locationX},${locationY}`,
+                    );
+                  }}
+                  onResponderRelease={() => {
+                    if (sketchTool === "eraser") {
+                      return;
+                    }
+
+                    if (currentSketchPath) {
+                      setSketchPaths((previous) => [
+                        ...previous,
+                        currentSketchPath,
+                      ]);
+                      setCurrentSketchPath("");
+                      setSketchDirty(true);
+                    }
+                  }}
+                >
+                  <Svg
+                    width="100%"
+                    height="240"
+                    viewBox="0 0 320 240"
+                    preserveAspectRatio="none"
+                  >
+                    {sketchPaths.map((path, index) => (
+                      <Path
+                        key={index}
+                        d={path}
+                        stroke="#8E4565"
+                        strokeWidth={3}
+                        fill="none"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    ))}
+
+                    {currentSketchPath ? (
+                      <Path
+                        d={currentSketchPath}
+                        stroke="#8E4565"
+                        strokeWidth={3}
+                        fill="none"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    ) : null}
+                  </Svg>
+                </View>
+
+                {enhancedSketchUri ? (
+                  <View style={styles.enhancedSketchPreview}>
+                    <Text style={styles.fieldLabel}>
+                      Captured Sketch
+                    </Text>
+
+                    <Image
+                      source={{ uri: enhancedSketchUri }}
+                      style={styles.enhancedSketchImage}
+                      resizeMode="contain"
+                    />
+                  </View>
+                ) : null}
+
+                <Text style={styles.sketchHint}>
+                  Draw your garment design using your finger.
+                </Text>
+
+                <Text style={styles.fieldLabel}>Fabric Reference Photos</Text>
+
+                <TouchableOpacity
+                  style={styles.fabricPickerButton}
+                  onPress={pickFabricPhoto}
+                >
+                  <Text style={styles.fabricPickerText}>
+                    + Add Fabric Photos
+                  </Text>
+                </TouchableOpacity>
+
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.fabricPhotoRow}
+                >
+                  {fabricPhotos.map((uri, index) => (
+                    <View
+                      key={`${uri}-${index}`}
+                      style={styles.fabricPhotoWrapper}
+                    >
+                      <Image source={{ uri }} style={styles.fabricPhoto} />
+
+                      <TouchableOpacity
+                        style={styles.removeFabricPhoto}
+                        onPress={() => removeFabricPhoto(uri)}
+                      >
+                        <Text style={styles.removeFabricPhotoText}>×</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                </ScrollView>
+              </View>
+
+              <View style={styles.twoColumn}>
+                <View style={styles.column}>
+                  <Text style={styles.fieldLabel}>Quantity</Text>
+
+                  <TextInput
+                    value={form.quantity}
+                    onChangeText={(value) => updateField("quantity", value)}
+                    placeholder="1"
+                    placeholderTextColor="#999"
+                    style={styles.input}
+                    keyboardType="number-pad"
+                  />
+                </View>
+
+                <View style={styles.column}>
+                  <Text style={styles.fieldLabel}>Price / Piece</Text>
+
+                  <TextInput
+                    value={form.price}
+                    onChangeText={(value) => updateField("price", value)}
+                    placeholder="0"
+                    placeholderTextColor="#999"
+                    style={styles.input}
+                    keyboardType="decimal-pad"
+                  />
+                </View>
+              </View>
+
+              <View style={styles.twoColumn}>
+                <View style={styles.column}>
+                  <Text style={styles.fieldLabel}>Order Date</Text>
+
+                  <TextInput
+                    value={form.orderDate}
+                    onChangeText={(value) => updateField("orderDate", value)}
+                    placeholder="DD/MM/YYYY"
+                    placeholderTextColor="#999"
+                    style={styles.input}
+                    keyboardType="numbers-and-punctuation"
+                  />
+                </View>
+
+                <View style={styles.column}>
+                  <Text style={styles.fieldLabel}>Delivery Date</Text>
+
+                  <TextInput
+                    value={form.deliveryDate}
+                    onChangeText={(value) => updateField("deliveryDate", value)}
+                    placeholder="DD/MM/YYYY"
+                    placeholderTextColor="#999"
+                    style={styles.input}
+                    keyboardType="numbers-and-punctuation"
+                  />
+                </View>
+              </View>
+
+              <Text style={styles.formSectionTitle}>Notes</Text>
+
               <TextInput
-                value={notes}
-                onChangeText={setNotes}
-                style={[styles.textInput, styles.notesInput]}
+                value={form.notes}
+                onChangeText={(value) => updateField("notes", value)}
                 placeholder="Special instructions..."
-                placeholderTextColor="#A59BA1"
+                placeholderTextColor="#999"
                 multiline
-                textAlignVertical="top"
-                editable={!saving}
+                style={[styles.input, styles.notesInput]}
               />
 
-              {Number(price) > 0 && Number(quantity) > 0 && (
-                <View style={styles.totalPreview}>
-                  <Text style={styles.totalPreviewLabel}>Order Total</Text>
-                  <Text style={styles.totalPreviewValue}>
-                    {formatCurrency(Number(price) * Number(quantity))}
-                  </Text>
-                </View>
-              )}
-
-              <TouchableOpacity
-                style={[
-                  styles.createButton,
-                  saving && styles.createButtonDisabled,
-                ]}
-                onPress={handleCreate}
-                disabled={saving}
-                activeOpacity={0.88}
-              >
-                <Text style={styles.createButtonText}>
-                  {saving ? "Saving..." : "Create Order"}
+              <TouchableOpacity style={styles.saveButton} onPress={saveOrder}>
+                <Text style={styles.saveButtonText}>
+                  {editingOrder ? "Update Order" : "Create Order"}
                 </Text>
               </TouchableOpacity>
 
-              <TouchableOpacity
-                style={styles.cancelButton}
-                onPress={() => setShowCreateModal(false)}
-                disabled={saving}
-              >
+              <TouchableOpacity style={styles.cancelButton} onPress={closeForm}>
                 <Text style={styles.cancelButtonText}>Cancel</Text>
               </TouchableOpacity>
             </ScrollView>
           </View>
-        </KeyboardAvoidingView>
+        </View>
       </Modal>
 
-      {/* ORDER DETAILS MODAL */}
+      {/* DETAILS MODAL */}
       <Modal
-        visible={!!selectedOrder}
+        visible={showDetails}
         transparent
-        animationType="slide"
-        onRequestClose={closeOrderDetails}
+        animationType="fade"
+        onRequestClose={() => setShowDetails(false)}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.detailsCard}>
+        <View style={styles.overlay}>
+          <View style={styles.detailsModal}>
             {selectedOrder && (
               <>
                 <View style={styles.modalHeader}>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.modalTitle}>
-                      {getOrderDisplayNumber(selectedOrder)}
-                    </Text>
+                    <Text style={styles.modalTitle}>{selectedOrder.item}</Text>
+
                     <Text style={styles.modalSubtitle}>
+                      {selectedOrder.orderNumber ||
+                        `#${selectedOrder.id.slice(-6)}`}
+                      {" • "}
                       {selectedOrder.customerName}
                     </Text>
                   </View>
 
                   <TouchableOpacity
-                    onPress={closeOrderDetails}
-                    disabled={saving}
-                    style={styles.modalClose}
+                    style={styles.closeButton}
+                    onPress={() => setShowDetails(false)}
                   >
-                    <Text style={styles.modalCloseText}>×</Text>
+                    <Text style={styles.closeText}>×</Text>
                   </TouchableOpacity>
                 </View>
 
-                <ScrollView
-                  contentContainerStyle={styles.detailsContent}
-                  showsVerticalScrollIndicator={false}
-                >
-                  <View style={styles.detailsHero}>
-                    <View style={styles.detailsHeroIcon}>
-                      <Text style={styles.detailsHeroIconText}>✂</Text>
-                    </View>
+                <ScrollView showsVerticalScrollIndicator={false}>
 
-                    <View style={styles.detailsHeroInfo}>
-                      <Text style={styles.detailsHeroItem}>
-                        {selectedOrder.item}
+{/* DELIVERY */}
+                  <View style={styles.deliveryStatusCard}>
+                    <View style={styles.deliveryStatusLeft}>
+                      <Text style={styles.deliveryStatusLabel}>
+                        DELIVERY STATUS
                       </Text>
-                      <Text style={styles.detailsHeroMeta}>
-                        Qty {selectedOrder.quantity || 1} •{" "}
-                        {formatCurrency(selectedOrder.price)} / item
+
+                      <Text style={styles.deliveryStatusDate}>
+                        {formatDate(selectedOrder.deliveryDate)}
                       </Text>
                     </View>
 
-                    <StatusBadge status={selectedOrder.status} />
-                  </View>
-
-                  <View style={styles.detailsSummary}>
-                    <View style={styles.detailsSummaryCell}>
-                      <Text style={styles.detailsSummaryLabel}>Total</Text>
-                      <Text style={styles.detailsSummaryValue}>
-                        {formatCurrency(
-                          Number(selectedOrder.price || 0) *
-                            Number(selectedOrder.quantity || 0)
-                        )}
-                      </Text>
-                    </View>
-
-                    <View style={styles.detailsSummaryDivider} />
-
-                    <View style={styles.detailsSummaryCell}>
-                      <Text style={styles.detailsSummaryLabel}>Ordered</Text>
-                      <Text style={styles.detailsSummaryValue}>
-                        {selectedOrder.orderDate || "—"}
-                      </Text>
-                    </View>
-
-                    <View style={styles.detailsSummaryDivider} />
-
-                    <View style={styles.detailsSummaryCell}>
-                      <Text style={styles.detailsSummaryLabel}>Delivery</Text>
-                      <Text style={styles.detailsSummaryValue}>
-                        {selectedOrder.deliveryDate || "—"}
-                      </Text>
-                    </View>
-                  </View>
-
-                  <View style={styles.section}>
-                    <Text style={styles.sectionTitle}>Order Status</Text>
-
-                    <View style={styles.statusUpdatePanel}>
-                      <Text style={styles.statusUpdateLabel}>
-                        Update current status
-                      </Text>
-
-                      <ScrollView
-                        horizontal
-                        showsHorizontalScrollIndicator={false}
-                        contentContainerStyle={styles.statusChips}
+                    <View
+                      style={[
+                        styles.deliveryInfoBadge,
+                        {
+                          backgroundColor:
+                            getDeliveryInfo(selectedOrder).background,
+                        },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.deliveryInfoBadgeText,
+                          {
+                            color: getDeliveryInfo(selectedOrder).color,
+                          },
+                        ]}
                       >
-                        {WORKFLOW_STATUSES.map((workflowStatus) => {
-                          const active =
-                            normalizeStatus(selectedOrder.status) ===
-                            workflowStatus;
-
-                          return (
-                            <TouchableOpacity
-                              key={workflowStatus}
-                              style={[
-                                styles.statusChip,
-                                active && styles.statusChipActive,
-                              ]}
-                              onPress={() =>
-                                updateOrderStatus(workflowStatus)
-                              }
-                              disabled={saving}
-                            >
-                              <Text
-                                style={[
-                                  styles.statusChipText,
-                                  active && styles.statusChipTextActive,
-                                ]}
-                              >
-                                {workflowStatus}
-                              </Text>
-                            </TouchableOpacity>
-                          );
-                        })}
-                      </ScrollView>
+                        {getDeliveryInfo(selectedOrder).label}
+                      </Text>
                     </View>
-
-                    {renderStatusTimeline(selectedOrder)}
                   </View>
 
-                  <View style={styles.section}>
-                    <Text style={styles.sectionTitle}>
-                      Measurement Snapshot
+                  {/* ORDER INFORMATION */}
+                  <View style={styles.detailsSection}>
+                    <Text style={styles.detailsSectionTitle}>
+                      Order Information
                     </Text>
 
-                    {renderMeasurementSnapshot(
-                      selectedOrder.measurementSnapshot
-                    )}
+                    <DetailRow
+                      label="Customer"
+                      value={selectedOrder.customerName}
+                    />
+
+                    <DetailRow label="Item" value={selectedOrder.item} />
+
+                    <DetailRow
+                      label="Quantity"
+                      value={String(selectedOrder.quantity)}
+                    />
+
+                    <DetailRow
+                      label="Price / Piece"
+                      value={money(Number(selectedOrder.price || 0))}
+                    />
+
+                    <DetailRow
+                      label="Total"
+                      value={money(orderTotal(selectedOrder))}
+                    />
+
+                    <DetailRow
+                      label="Order Date"
+                      value={formatDate(selectedOrder.orderDate)}
+                    />
+
+                    <DetailRow
+                      label="Delivery Date"
+                      value={formatDate(selectedOrder.deliveryDate)}
+                    />
+
+                    <DetailRow
+                      label="Measurement"
+                      value={selectedOrder.measurementUsed || "Not selected"}
+                    />
                   </View>
 
-                  {!!selectedOrder.measurementUsed && (
-                    <View style={styles.section}>
-                      <Text style={styles.sectionTitle}>
-                        Measurement Used
+                  {/* SNAPSHOT */}
+                  {selectedOrder.measurementSnapshot && (
+                    <View style={styles.detailsSection}>
+                      <Text style={styles.detailsSectionTitle}>
+                        Measurement Snapshot
                       </Text>
-                      <View style={styles.infoBox}>
-                        <Text style={styles.infoBoxText}>
-                          {selectedOrder.measurementUsed}
-                        </Text>
-                      </View>
-                    </View>
-                  )}
 
-                  {!!selectedOrder.notes && (
-                    <View style={styles.section}>
-                      <Text style={styles.sectionTitle}>Notes</Text>
-                      <View style={styles.infoBox}>
-                        <Text style={styles.infoBoxText}>
-                          {selectedOrder.notes}
-                        </Text>
+                      <View style={styles.snapshotGrid}>
+                        <SnapshotValue
+                          label="Bust"
+                          value={selectedOrder.measurementSnapshot.bust}
+                        />
+
+                        <SnapshotValue
+                          label="Waist"
+                          value={selectedOrder.measurementSnapshot.waist}
+                        />
+
+                        <SnapshotValue
+                          label="Hip"
+                          value={selectedOrder.measurementSnapshot.hip}
+                        />
+
+                        <SnapshotValue
+                          label="Shoulder"
+                          value={selectedOrder.measurementSnapshot.shoulder}
+                        />
+
+                        <SnapshotValue
+                          label="Sleeve"
+                          value={selectedOrder.measurementSnapshot.sleeveLength}
+                        />
+
+                        <SnapshotValue
+                          label="Blouse"
+                          value={selectedOrder.measurementSnapshot.blouseLength}
+                        />
+
+                        <SnapshotValue
+                          label="Front Neck"
+                          value={selectedOrder.measurementSnapshot.frontNeck}
+                        />
+
+                        <SnapshotValue
+                          label="Back Neck"
+                          value={selectedOrder.measurementSnapshot.backNeck}
+                        />
+
+                        <SnapshotValue
+                          label="Armhole"
+                          value={selectedOrder.measurementSnapshot.armhole}
+                        />
                       </View>
                     </View>
                   )}
+                                    {/* FABRIC REFERENCE PHOTOS */}
+                  {selectedOrderFabricPhotos.length > 0 && (
+                    <View style={styles.detailsSection}>
+                      <Text style={styles.detailsSectionTitle}>
+                        Fabric Reference Photos
+                      </Text>
+
+                      <View style={styles.photoGrid}>
+                        {selectedOrderFabricPhotos.map((uri, index) => (
+                          <Image
+                            key={`${uri}-${index}`}
+                            source={{ uri }}
+                            style={styles.orderFabricImage}
+                          />
+                        ))}
+                      </View>
+                    </View>
+                  )}
+{/* DESIGN ASSETS */}
+{savedDesignAssets.length > 0 && (
+  <View style={styles.detailsSection}>
+
+    <Text style={styles.detailsSectionTitle}>
+      Design References
+    </Text>
+
+    <View style={styles.photoGrid}>
+
+      {savedDesignAssets.map((asset) => (
+        asset.signedUrl ? (
+          <Image
+            key={asset.id}
+            source={{ uri: asset.signedUrl }}
+            style={styles.orderFabricImage}
+          />
+        ) : null
+      ))}
+
+    </View>
+
+  </View>
+)}
+
+                  {/* NOTES */}
+                  <View style={styles.detailsSection}>
+                    <Text style={styles.detailsSectionTitle}>Notes</Text>
+
+                    <Text style={styles.detailsNotes}>
+                      {selectedOrder.notes || "No notes added."}
+                    </Text>
+                  </View>
+
+                  {/* EDIT */}
+                  <TouchableOpacity
+                    style={styles.editOrderButton}
+                    onPress={() => {
+                      setShowDetails(false);
+                      openEditForm(selectedOrder);
+                    }}
+                  >
+                    <Text style={styles.editOrderText}>Edit Order</Text>
+                  </TouchableOpacity>
+
+                  {/* DELETE */}
+                  <TouchableOpacity
+                    style={styles.deleteOrderButton}
+                    onPress={() => handleDeleteOrder(selectedOrder)}
+                  >
+                    <Text style={styles.deleteOrderText}>Delete Order</Text>
+                  </TouchableOpacity>
 
                   <TouchableOpacity
                     style={styles.closeDetailsButton}
-                    onPress={closeOrderDetails}
-                    disabled={saving}
+                    onPress={() => setShowDetails(false)}
                   >
-                    <Text style={styles.closeDetailsButtonText}>
-                      Close
-                    </Text>
+                    <Text style={styles.closeDetailsText}>Close</Text>
                   </TouchableOpacity>
                 </ScrollView>
               </>
@@ -1363,163 +2391,351 @@ export default function OrdersScreen({
 }
 
 /* -------------------------------------------------------
+   SMALL COMPONENTS
+------------------------------------------------------- */
+
+function SummaryCard({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.summaryCard}>
+      <Text style={styles.summaryValue}>{value}</Text>
+
+      <Text style={styles.summaryLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function StatusBadge({ status }: { status: OrderStatus }) {
+  return (
+    <View
+      style={[
+        styles.statusBadge,
+        {
+          backgroundColor: `${statusColor(status)}18`,
+          borderColor: `${statusColor(status)}40`,
+        },
+      ]}
+    >
+      <Text
+        style={[
+          styles.statusBadgeText,
+          {
+            color: statusColor(status),
+          },
+        ]}
+      >
+        {status}
+      </Text>
+    </View>
+  );
+}
+
+function DetailRow({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.detailRow}>
+      <Text style={styles.detailLabel}>{label}</Text>
+
+      <Text style={styles.detailValue}>{value || "-"}</Text>
+    </View>
+  );
+}
+
+function SnapshotValue({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={styles.snapshotItem}>
+      <Text style={styles.snapshotLabel}>{label}</Text>
+
+      <Text style={styles.snapshotValue}>{value || "-"}</Text>
+    </View>
+  );
+}
+
+/* -------------------------------------------------------
    STYLES
 ------------------------------------------------------- */
 
 const styles = StyleSheet.create({
-  screen: {
+  container: {
     flex: 1,
-    backgroundColor: BRAND.cream,
+    backgroundColor: colors.Cream,
+  },
+
+  scrollContent: {
+    padding: 18,
+    paddingBottom: 45,
   },
 
   header: {
-    backgroundColor: BRAND.wine,
-    paddingTop: 18,
-    paddingHorizontal: 16,
-    paddingBottom: 18,
-  },
-
-  headerTopRow: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
+    marginBottom: 18,
   },
 
-  headerBack: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+  backButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: colors.White,
+    borderWidth: 1,
+    borderColor: colors.Border,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.12)",
-    marginRight: 10,
+    marginRight: 9,
   },
 
-  headerBackText: {
-    color: BRAND.white,
-    fontSize: 24,
-    fontWeight: "500",
+  backButtonText: {
+    fontSize: 31,
+    color: colors.PrimaryWine,
+    marginTop: -5,
   },
 
-  headerTextBlock: {
+  headerText: {
     flex: 1,
-    paddingRight: 8,
   },
 
-  headerTitle: {
-    color: BRAND.white,
-    fontSize: 25,
-    fontWeight: "800",
+  brand: {
+    color: colors.Gold,
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 0.8,
   },
 
-  headerSubtitle: {
-    color: "rgba(255,255,255,0.78)",
-    fontSize: 11,
-    lineHeight: 16,
+  title: {
+    color: colors.DarkText,
+    fontSize: 27,
+    fontWeight: "900",
+    marginTop: 2,
+  },
+
+  subtitle: {
+    color: colors.Gray,
+    fontSize: 12,
     marginTop: 3,
   },
 
-  newOrderButton: {
-    minWidth: 62,
-    height: 44,
-    borderRadius: 13,
-    backgroundColor: BRAND.gold,
-    alignItems: "center",
-    justifyContent: "center",
-    flexDirection: "row",
-    paddingHorizontal: 10,
+  addButton: {
+    backgroundColor: colors.PrimaryWine,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    marginLeft: 8,
   },
 
-  newOrderButtonText: {
-    color: BRAND.white,
-    fontSize: 21,
-    fontWeight: "600",
-    marginRight: 2,
-  },
-
-  newOrderButtonLabel: {
-    color: BRAND.white,
+  addButtonText: {
+    color: colors.White,
     fontSize: 13,
-    fontWeight: "800",
+    fontWeight: "900",
   },
 
   summaryRow: {
     flexDirection: "row",
-    gap: 10,
-    paddingHorizontal: 16,
-    paddingTop: 14,
+    gap: 8,
+    marginBottom: 10,
   },
 
-  summaryPill: {
+  summaryCard: {
     flex: 1,
-    backgroundColor: BRAND.white,
-    borderRadius: 14,
-    paddingVertical: 11,
-    alignItems: "center",
+    backgroundColor: colors.White,
+    borderRadius: 13,
     borderWidth: 1,
-    borderColor: BRAND.border,
+    borderColor: colors.Border,
+    paddingVertical: 12,
+    alignItems: "center",
   },
 
-  summaryPillValue: {
-    color: BRAND.wine,
-    fontSize: 19,
-    fontWeight: "800",
+  summaryValue: {
+    color: colors.PrimaryWine,
+    fontSize: 18,
+    fontWeight: "900",
   },
 
-  summaryPillLabel: {
-    color: BRAND.muted,
-    fontSize: 11,
+  summaryLabel: {
+    color: colors.Gray,
+    fontSize: 9,
+    marginTop: 2,
+    fontWeight: "700",
+  },
+
+  alertSummaryCard: {
+    backgroundColor: "#FFF5F8",
+    borderWidth: 1,
+    borderColor: "#F8BBD0",
+    borderRadius: 14,
+    padding: 11,
+    marginBottom: 10,
+    flexDirection: "row",
+    alignItems: "center",
+  },
+
+  alertSummaryIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: "#FCE5EF",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 10,
+  },
+
+  alertIconText: {
+    color: colors.Orange,
+    fontSize: 18,
+    fontWeight: "900",
+  },
+
+  alertSummaryText: {
+    flex: 1,
+  },
+
+  alertSummaryTitle: {
+    color: colors.DarkText,
+    fontSize: 12,
+    fontWeight: "900",
+  },
+
+  alertSummarySubtitle: {
+    color: colors.Orange,
+    fontSize: 10,
+    fontWeight: "700",
     marginTop: 2,
   },
 
-  searchWrap: {
-    marginHorizontal: 16,
-    marginTop: 13,
-    marginBottom: 4,
-    height: 48,
-    borderRadius: 14,
-    backgroundColor: BRAND.white,
+  valueCard: {
+    backgroundColor: colors.PrimaryWine,
+    borderRadius: 16,
+    padding: 15,
+    marginBottom: 13,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+
+  valueLabel: {
+    color: "#FCE4EC",
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 0.6,
+  },
+
+  valueAmount: {
+    color: colors.White,
+    fontSize: 23,
+    fontWeight: "900",
+    marginTop: 3,
+  },
+
+  valueIcon: {
+    width: 43,
+    height: 43,
+    borderRadius: 22,
+    backgroundColor: "#C2185B20",
+    color: colors.White,
+    textAlign: "center",
+    textAlignVertical: "center",
+    paddingTop: 9,
+    fontSize: 21,
+    fontWeight: "900",
+  },
+
+  searchBox: {
+    height: 49,
+    backgroundColor: colors.White,
+    borderRadius: 13,
     borderWidth: 1,
-    borderColor: BRAND.border,
+    borderColor: colors.Border,
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 13,
+    marginBottom: 11,
   },
 
   searchIcon: {
-    fontSize: 22,
-    color: BRAND.wine,
-    marginRight: 8,
+    color: colors.PrimaryWine,
+    fontSize: 18,
+    marginRight: 10,
   },
 
   searchInput: {
     flex: 1,
-    color: BRAND.dark,
+    color: colors.DarkText,
     fontSize: 14,
   },
 
-  clearSearch: {
-    color: BRAND.muted,
-    fontSize: 25,
+  clearText: {
+    color: colors.Gray,
+    fontSize: 24,
     paddingLeft: 8,
   },
 
-  listContent: {
-    padding: 16,
-    paddingBottom: 40,
+  filterRow: {
+    gap: 7,
+    paddingBottom: 15,
+  },
+
+  filterChip: {
+    backgroundColor: colors.White,
+    borderWidth: 1,
+    borderColor: colors.Border,
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+
+  filterChipActive: {
+    backgroundColor: colors.PrimaryWine,
+    borderColor: colors.PrimaryWine,
+  },
+
+  filterChipText: {
+    color: colors.Gray,
+    fontSize: 10,
+    fontWeight: "800",
+  },
+
+  filterChipTextActive: {
+    color: colors.White,
+  },
+
+  sectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 10,
+  },
+
+  sectionTitle: {
+    flex: 1,
+    color: colors.DarkText,
+    fontSize: 18,
+    fontWeight: "900",
+  },
+
+  sectionCount: {
+    minWidth: 29,
+    height: 29,
+    borderRadius: 15,
+    backgroundColor: colors.SoftPink,
+    color: colors.PrimaryWine,
+    textAlign: "center",
+    textAlignVertical: "center",
+    paddingTop: 6,
+    fontSize: 11,
+    fontWeight: "900",
   },
 
   orderCard: {
-    backgroundColor: BRAND.white,
-    borderRadius: 18,
-    padding: 15,
-    marginBottom: 12,
+    backgroundColor: colors.White,
+    borderRadius: 22,
     borderWidth: 1,
-    borderColor: BRAND.border,
-    shadowColor: "#000",
-    shadowOpacity: 0.04,
-    shadowRadius: 7,
-    shadowOffset: { width: 0, height: 3 },
-    elevation: 2,
+    borderColor: "#F8BBD0",
+    padding: 17,
+    marginBottom: 15,
+    shadowColor: "#C2185B",
+    shadowOffset: {
+      width: 0,
+      height: 4,
+    },
+    shadowOpacity: 0.07,
+    shadowRadius: 10,
+    elevation: 3,
   },
 
   orderCardTop: {
@@ -1528,862 +2744,1050 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
 
-  orderNumberBlock: {
+  orderIdentity: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    marginRight: 8,
+  },
+
+  customerInitialBadge: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: colors.SoftPink,
+    borderWidth: 1,
+    borderColor: "#F8BBD0",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 10,
+  },
+
+  customerInitialText: {
+    color: colors.PrimaryWine,
+    fontSize: 17,
+    fontWeight: "900",
+  },
+
+  orderNumberBox: {
     flex: 1,
   },
 
   orderNumber: {
-    color: BRAND.wine,
-    fontSize: 14,
-    fontWeight: "800",
+    color: colors.DarkText,
+    fontSize: 13,
+    fontWeight: "900",
   },
 
-  orderCustomer: {
-    color: BRAND.dark,
-    fontSize: 16,
-    fontWeight: "700",
-    marginTop: 4,
+  orderDate: {
+    color: colors.Gray,
+    fontSize: 10,
+    marginTop: 3,
   },
 
   statusBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
     borderRadius: 20,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    alignSelf: "flex-start",
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    minHeight: 30,
+  },
+
+  statusBadgeIcon: {
+    fontSize: 11,
+    marginRight: 5,
   },
 
   statusBadgeText: {
     fontSize: 10,
-    fontWeight: "800",
+    fontWeight: "900",
+    letterSpacing: 0.2,
   },
 
-  orderDivider: {
-    height: 1,
-    backgroundColor: "#F0E8EC",
-    marginVertical: 12,
-  },
-
-  orderMainRow: {
+  orderMain: {
     flexDirection: "row",
     alignItems: "center",
+    marginTop: 14,
   },
 
-  garmentIcon: {
-    width: 44,
-    height: 44,
+  itemIcon: {
+    width: 45,
+    height: 45,
     borderRadius: 13,
-    backgroundColor: BRAND.softPink,
+    backgroundColor: colors.SoftPink,
     alignItems: "center",
     justifyContent: "center",
+    marginRight: 11,
   },
 
-  garmentIconText: {
-    color: BRAND.wine,
-    fontSize: 21,
+  itemIconText: {
+    fontSize: 20,
   },
 
-  orderInfo: {
+  itemInfo: {
     flex: 1,
-    paddingHorizontal: 11,
   },
 
-  orderItem: {
-    color: BRAND.dark,
+  itemName: {
+    color: colors.DarkText,
     fontSize: 15,
-    fontWeight: "800",
+    fontWeight: "900",
   },
 
-  orderMeta: {
-    color: BRAND.muted,
+  customerText: {
+    color: colors.Gray,
     fontSize: 11,
-    marginTop: 4,
-  },
-
-  orderPriceBlock: {
-    alignItems: "flex-end",
-  },
-
-  orderTotal: {
-    color: BRAND.wine,
-    fontSize: 15,
-    fontWeight: "800",
-  },
-
-  orderUnitPrice: {
-    color: BRAND.muted,
-    fontSize: 9,
     marginTop: 3,
   },
 
-  orderFooter: {
-    marginTop: 13,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-  },
-
-  measurementIndicator: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-
-  measurementIndicatorIcon: {
-    fontSize: 13,
-    marginRight: 5,
-  },
-
-  measurementIndicatorText: {
-    color: BRAND.green,
+  measurementText: {
+    color: colors.PrimaryWine,
     fontSize: 10,
+    marginTop: 4,
     fontWeight: "700",
   },
 
-  measurementIndicatorMuted: {
-    color: BRAND.muted,
+  progressSection: {
+    marginTop: 14,
   },
 
-  orderStatusHint: {
+  progressHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 5,
+  },
+
+  progressLabel: {
+    color: colors.Gray,
+    fontSize: 8,
+    fontWeight: "900",
+    letterSpacing: 0.5,
+  },
+
+  progressPercent: {
     fontSize: 10,
+    fontWeight: "900",
+  },
+
+  progressTrack: {
+    height: 6,
+    backgroundColor: "#FCE5EF",
+    borderRadius: 6,
+    overflow: "hidden",
+  },
+
+  progressFill: {
+    height: "100%",
+    borderRadius: 6,
+  },
+
+  miniStatusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 6,
+  },
+
+  miniStatusCurrent: {
+    color: colors.DarkText,
+    fontSize: 9,
+    fontWeight: "900",
+  },
+
+  miniStatusHint: {
+    color: colors.Gray,
+    fontSize: 8,
+    fontWeight: "700",
+  },
+
+  orderBottom: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 14,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: colors.Border,
+  },
+
+  deliveryBox: {
+    flex: 1,
+  },
+
+  deliveryLabel: {
+    color: colors.Gray,
+    fontSize: 8,
     fontWeight: "800",
   },
 
-  emptyState: {
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 30,
-    paddingVertical: 75,
+  deliveryDate: {
+    color: colors.DarkText,
+    fontSize: 11,
+    fontWeight: "800",
+    marginTop: 3,
   },
 
-  emptyIconCircle: {
-    width: 70,
-    height: 70,
-    borderRadius: 35,
-    backgroundColor: BRAND.softPink,
+  deliveryBadge: {
+    alignSelf: "flex-start",
+    borderRadius: 12,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    marginTop: 6,
+  },
+
+  deliveryBadgeText: {
+    fontSize: 9,
+    fontWeight: "900",
+    letterSpacing: 0.2,
+  },
+
+  quantityBox: {
+    marginLeft: "auto",
     alignItems: "center",
-    justifyContent: "center",
+    minWidth: 48,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    backgroundColor: "#FFF5F8",
+    borderRadius: 12,
+  },
+
+  quantityLabel: {
+    color: colors.Gray,
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 0.3,
+  },
+
+  quantityValue: {
+    color: colors.DarkText,
+    fontSize: 13,
+    fontWeight: "900",
+    marginTop: 4,
+  },
+
+  priceBox: {
+    marginLeft: 12,
+    alignItems: "flex-end",
+    paddingLeft: 8,
+  },
+
+  priceLabel: {
+    color: colors.Gray,
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 0.3,
+  },
+
+  priceValue: {
+    color: colors.PrimaryWine,
+    fontSize: 16,
+    fontWeight: "900",
+    marginTop: 4,
+  },
+
+  emptyCard: {
+    backgroundColor: colors.White,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: colors.Border,
+    alignItems: "center",
+    padding: 30,
   },
 
   emptyIcon: {
-    fontSize: 30,
+    fontSize: 38,
   },
 
   emptyTitle: {
-    color: BRAND.dark,
-    fontSize: 19,
-    fontWeight: "800",
-    marginTop: 16,
+    color: colors.DarkText,
+    fontSize: 17,
+    fontWeight: "900",
+    marginTop: 10,
   },
 
   emptyText: {
-    color: BRAND.muted,
+    color: colors.Gray,
+    fontSize: 12,
+    marginTop: 5,
     textAlign: "center",
-    fontSize: 13,
-    lineHeight: 20,
-    marginTop: 7,
   },
 
-  emptyAction: {
-    marginTop: 18,
-    backgroundColor: BRAND.wine,
-    borderRadius: 12,
-    paddingHorizontal: 17,
-    paddingVertical: 12,
+  emptyButton: {
+    backgroundColor: colors.PrimaryWine,
+    borderRadius: 11,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    marginTop: 15,
   },
 
-  emptyActionText: {
-    color: BRAND.white,
-    fontSize: 13,
-    fontWeight: "800",
+  emptyButtonText: {
+    color: colors.White,
+    fontWeight: "900",
   },
 
-  /* MODALS */
-
-  modalOverlay: {
+  overlay: {
     flex: 1,
-    backgroundColor: "rgba(30,20,25,0.48)",
+    backgroundColor: "rgba(20,10,15,0.5)",
     justifyContent: "flex-end",
   },
 
-  modalCard: {
-    backgroundColor: BRAND.cream,
+  formModal: {
+    maxHeight: "95%",
+    backgroundColor: colors.Cream,
     borderTopLeftRadius: 26,
     borderTopRightRadius: 26,
-    maxHeight: "94%",
-    paddingTop: 18,
+    padding: 20,
   },
 
-  detailsCard: {
-    backgroundColor: BRAND.cream,
-    borderTopLeftRadius: 26,
-    borderTopRightRadius: 26,
+  detailsModal: {
     maxHeight: "94%",
-    minHeight: "72%",
-    paddingTop: 18,
+    backgroundColor: colors.Cream,
+    borderRadius: 24,
+    margin: 15,
+    padding: 20,
   },
 
   modalHeader: {
     flexDirection: "row",
-    alignItems: "flex-start",
-    paddingHorizontal: 18,
-    paddingBottom: 12,
+    alignItems: "center",
+    marginBottom: 17,
   },
 
   modalTitle: {
-    color: BRAND.dark,
+    color: colors.DarkText,
     fontSize: 21,
-    fontWeight: "800",
+    fontWeight: "900",
   },
 
   modalSubtitle: {
-    color: BRAND.muted,
+    color: colors.Gray,
     fontSize: 11,
-    marginTop: 4,
-    lineHeight: 16,
+    marginTop: 3,
   },
 
-  modalClose: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: "#F1E8EC",
+  closeButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: colors.White,
     alignItems: "center",
     justifyContent: "center",
     marginLeft: 10,
   },
 
-  modalCloseText: {
-    color: BRAND.dark,
-    fontSize: 24,
-    lineHeight: 25,
+  closeText: {
+    color: colors.DarkText,
+    fontSize: 25,
+    marginTop: -2,
   },
 
-  formContent: {
-    paddingHorizontal: 18,
-    paddingBottom: 35,
+  formSectionTitle: {
+    color: colors.DarkText,
+    fontSize: 14,
+    fontWeight: "900",
+    marginTop: 10,
+    marginBottom: 9,
+  },
+
+  customerChipRow: {
+    gap: 7,
+    paddingBottom: 4,
+  },
+
+  customerChip: {
+    backgroundColor: colors.White,
+    borderWidth: 1,
+    borderColor: colors.Border,
+    borderRadius: 20,
+    paddingHorizontal: 13,
+    paddingVertical: 9,
+  },
+
+  customerChipActive: {
+    backgroundColor: colors.PrimaryWine,
+    borderColor: colors.PrimaryWine,
+  },
+
+  customerChipText: {
+    color: colors.Gray,
+    fontSize: 11,
+    fontWeight: "800",
+  },
+
+  customerChipTextActive: {
+    color: colors.White,
   },
 
   fieldLabel: {
-    color: BRAND.dark,
-    fontSize: 12,
+    color: colors.DarkText,
+    fontSize: 11,
     fontWeight: "800",
-    marginTop: 12,
-    marginBottom: 7,
+    marginBottom: 5,
   },
 
-  textInput: {
-    height: 47,
-    backgroundColor: BRAND.white,
+  input: {
+    minHeight: 46,
+    backgroundColor: colors.White,
     borderWidth: 1,
-    borderColor: BRAND.border,
-    borderRadius: 12,
-    paddingHorizontal: 13,
-    color: BRAND.dark,
+    borderColor: colors.Border,
+    borderRadius: 11,
+    paddingHorizontal: 12,
+    color: colors.DarkText,
     fontSize: 13,
+    marginBottom: 10,
   },
 
-  notesInput: {
-    height: 90,
-    paddingTop: 12,
+  measurementChipRow: {
+    gap: 7,
+    paddingBottom: 5,
   },
 
-  selectInput: {
-    minHeight: 47,
-    backgroundColor: BRAND.white,
+  measurementChip: {
+    minWidth: 110,
+    backgroundColor: colors.White,
     borderWidth: 1,
-    borderColor: BRAND.border,
+    borderColor: colors.Border,
     borderRadius: 12,
-    paddingHorizontal: 13,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
+    padding: 10,
   },
 
-  selectInputText: {
-    color: BRAND.dark,
-    fontSize: 13,
-    fontWeight: "600",
-    flex: 1,
+  measurementChipActive: {
+    backgroundColor: colors.PrimaryWine,
+    borderColor: colors.PrimaryWine,
   },
 
-  selectInputPlaceholder: {
-    color: "#A59BA1",
-    fontWeight: "400",
+  measurementChipTitle: {
+    color: colors.DarkText,
+    fontSize: 11,
+    fontWeight: "900",
   },
 
-  selectArrow: {
-    color: BRAND.wine,
-    fontSize: 10,
-    marginLeft: 8,
+  measurementChipTitleActive: {
+    color: colors.White,
   },
 
-  pickerPanel: {
-    backgroundColor: BRAND.white,
-    borderWidth: 1,
-    borderColor: BRAND.border,
-    borderRadius: 12,
-    marginTop: 6,
-    overflow: "hidden",
+  measurementChipDate: {
+    color: colors.Gray,
+    fontSize: 9,
+    marginTop: 3,
   },
 
-  pickerOption: {
-    minHeight: 47,
-    paddingHorizontal: 13,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    borderBottomWidth: 1,
-    borderBottomColor: "#F2E9ED",
+  measurementChipDateActive: {
+    color: "#FCE4EC",
   },
 
-  pickerOptionTitle: {
-    color: BRAND.dark,
-    fontSize: 13,
+  noMeasurementBox: {
+    backgroundColor: colors.SoftPink,
+    borderRadius: 11,
+    padding: 12,
+  },
+
+  noMeasurementText: {
+    color: colors.PrimaryWine,
+    fontSize: 11,
     fontWeight: "700",
   },
 
-  pickerOptionSub: {
-    color: BRAND.muted,
-    fontSize: 10,
-    marginTop: 2,
-  },
-
-  pickerCheck: {
-    color: BRAND.wine,
-    fontSize: 18,
-    fontWeight: "800",
-  },
-
-  pickerEmpty: {
-    color: BRAND.muted,
-    padding: 15,
-    fontSize: 12,
-  },
-
-  formTwoColumns: {
+  twoColumn: {
     flexDirection: "row",
     gap: 10,
   },
 
-  formColumn: {
+  column: {
     flex: 1,
   },
 
-  noMeasurementBox: {
-    backgroundColor: "#FFF4E2",
-    borderWidth: 1,
-    borderColor: "#F0D9AA",
-    borderRadius: 12,
-    padding: 13,
-  },
-
-  noMeasurementTitle: {
-    color: "#8A5B0A",
-    fontSize: 12,
-    fontWeight: "800",
-  },
-
-  noMeasurementText: {
-    color: "#8A6D39",
-    fontSize: 11,
-    lineHeight: 16,
-    marginTop: 3,
-  },
-
-  measurementSelectList: {
+  statusRow: {
     gap: 7,
+    paddingBottom: 5,
   },
 
-  measurementOption: {
-    backgroundColor: BRAND.white,
-    borderWidth: 1,
-    borderColor: BRAND.border,
-    borderRadius: 12,
-    minHeight: 54,
-    paddingHorizontal: 11,
+  statusOption: {
     flexDirection: "row",
     alignItems: "center",
+    backgroundColor: colors.White,
+    borderWidth: 1,
+    borderColor: colors.Border,
+    borderRadius: 20,
+    paddingHorizontal: 11,
+    paddingVertical: 8,
   },
 
-  measurementOptionActive: {
-    borderColor: BRAND.magenta,
-    backgroundColor: "#FFF4F8",
+  statusOptionIcon: {
+    fontSize: 10,
+    marginRight: 4,
   },
 
-  measurementOptionRadio: {
-    width: 19,
-    height: 19,
-    borderRadius: 10,
-    borderWidth: 2,
-    borderColor: "#CBBBC2",
+  statusOptionText: {
+    color: colors.Gray,
+    fontSize: 10,
+    fontWeight: "800",
+  },
+
+  statusOptionTextActive: {
+    color: colors.White,
+  },
+
+  notesInput: {
+    minHeight: 80,
+    textAlignVertical: "top",
+    paddingTop: 12,
+  },
+
+  saveButton: {
+    minHeight: 50,
+    backgroundColor: colors.PrimaryWine,
+    borderRadius: 13,
     alignItems: "center",
     justifyContent: "center",
-    marginRight: 9,
+    marginTop: 12,
   },
 
-  measurementOptionRadioInner: {
-    width: 9,
-    height: 9,
-    borderRadius: 5,
-    backgroundColor: BRAND.magenta,
+  saveButtonText: {
+    color: colors.White,
+    fontSize: 15,
+    fontWeight: "900",
   },
 
-  measurementOptionInfo: {
-    flex: 1,
+  cancelButton: {
+    minHeight: 47,
+    backgroundColor: colors.White,
+    borderWidth: 1,
+    borderColor: colors.Border,
+    borderRadius: 13,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 8,
   },
 
-  measurementOptionTitle: {
-    color: BRAND.dark,
-    fontSize: 12,
+  cancelButtonText: {
+    color: colors.DarkText,
     fontWeight: "800",
   },
 
-  measurementOptionDate: {
-    color: BRAND.muted,
-    fontSize: 10,
-    marginTop: 3,
-  },
+  /* DETAILS */
 
-  latestBadge: {
-    backgroundColor: BRAND.softPink,
-    borderRadius: 10,
-    paddingHorizontal: 7,
-    paddingVertical: 4,
-  },
-
-  latestBadgeText: {
-    color: BRAND.magenta,
-    fontSize: 9,
-    fontWeight: "800",
-  },
-
-  totalPreview: {
-    marginTop: 15,
-    borderRadius: 14,
-    backgroundColor: BRAND.softPink,
+  currentStatusCard: {
+    backgroundColor: colors.White,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: colors.Border,
     padding: 14,
+    marginBottom: 15,
+  },
+
+  currentStatusTop: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
   },
 
-  totalPreviewLabel: {
-    color: BRAND.dark,
-    fontSize: 12,
-    fontWeight: "700",
+  currentStatusLabel: {
+    color: colors.Gray,
+    fontSize: 8,
+    fontWeight: "900",
+    letterSpacing: 0.7,
   },
 
-  totalPreviewValue: {
-    color: BRAND.wine,
-    fontSize: 19,
+  currentStatusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 8,
+  },
+
+  currentStatusIcon: {
+    fontSize: 20,
+    marginRight: 8,
+  },
+
+  currentStatusText: {
+    fontSize: 17,
     fontWeight: "900",
   },
 
-  createButton: {
-    marginTop: 18,
-    height: 50,
-    borderRadius: 14,
-    backgroundColor: BRAND.wine,
+  progressCircleBox: {
     alignItems: "center",
     justifyContent: "center",
+    minWidth: 58,
   },
 
-  createButtonDisabled: {
-    opacity: 0.55,
+  progressCircleValue: {
+    fontSize: 18,
+    fontWeight: "900",
   },
 
-  createButtonText: {
-    color: BRAND.white,
-    fontSize: 14,
-    fontWeight: "800",
-  },
-
-  cancelButton: {
-    height: 45,
-    alignItems: "center",
-    justifyContent: "center",
-    marginTop: 5,
-  },
-
-  cancelButtonText: {
-    color: BRAND.muted,
-    fontSize: 13,
+  progressCircleLabel: {
+    color: colors.Gray,
+    fontSize: 8,
     fontWeight: "700",
+    marginTop: 1,
   },
 
-  /* DETAILS */
-
-  detailsContent: {
-    paddingHorizontal: 18,
-    paddingBottom: 35,
+  detailsProgressTrack: {
+    height: 7,
+    backgroundColor: "#FCE5EF",
+    borderRadius: 7,
+    overflow: "hidden",
+    marginTop: 12,
   },
 
-  detailsHero: {
-    backgroundColor: BRAND.white,
-    borderRadius: 17,
+  detailsProgressFill: {
+    height: "100%",
+    borderRadius: 7,
+  },
+
+  /* FULL FLOW */
+
+  progressFlowCard: {
+    backgroundColor: colors.White,
     borderWidth: 1,
-    borderColor: BRAND.border,
-    padding: 13,
-    flexDirection: "row",
-    alignItems: "center",
-  },
-
-  detailsHeroIcon: {
-    width: 48,
-    height: 48,
-    borderRadius: 14,
-    backgroundColor: BRAND.softPink,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  detailsHeroIconText: {
-    color: BRAND.wine,
-    fontSize: 23,
-  },
-
-  detailsHeroInfo: {
-    flex: 1,
-    paddingHorizontal: 10,
-  },
-
-  detailsHeroItem: {
-    color: BRAND.dark,
-    fontSize: 16,
-    fontWeight: "800",
-  },
-
-  detailsHeroMeta: {
-    color: BRAND.muted,
-    fontSize: 10,
-    marginTop: 4,
-  },
-
-  detailsSummary: {
-    marginTop: 10,
-    backgroundColor: BRAND.white,
-    borderRadius: 15,
-    borderWidth: 1,
-    borderColor: BRAND.border,
-    paddingVertical: 12,
-    flexDirection: "row",
-  },
-
-  detailsSummaryCell: {
-    flex: 1,
-    alignItems: "center",
-    paddingHorizontal: 4,
-  },
-
-  detailsSummaryLabel: {
-    color: BRAND.muted,
-    fontSize: 9,
-    fontWeight: "600",
-  },
-
-  detailsSummaryValue: {
-    color: BRAND.dark,
-    fontSize: 11,
-    fontWeight: "800",
-    marginTop: 4,
-    textAlign: "center",
-  },
-
-  detailsSummaryDivider: {
-    width: 1,
-    backgroundColor: "#EDE4E8",
-  },
-
-  section: {
-    marginTop: 18,
-  },
-
-  sectionTitle: {
-    color: BRAND.dark,
-    fontSize: 15,
-    fontWeight: "800",
-    marginBottom: 9,
-  },
-
-  statusUpdatePanel: {
-    backgroundColor: BRAND.white,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: BRAND.border,
+    borderColor: colors.Border,
+    borderRadius: 16,
     padding: 12,
+    marginBottom: 13,
   },
 
-  statusUpdateLabel: {
-    color: BRAND.muted,
-    fontSize: 10,
-    fontWeight: "700",
-    marginBottom: 9,
-  },
-
-  statusChips: {
-    gap: 7,
-    paddingRight: 10,
-  },
-
-  statusChip: {
-    borderWidth: 1,
-    borderColor: BRAND.border,
-    backgroundColor: "#FAF7F8",
-    borderRadius: 18,
-    paddingHorizontal: 11,
-    paddingVertical: 8,
-  },
-
-  statusChipActive: {
-    borderColor: BRAND.wine,
-    backgroundColor: BRAND.wine,
-  },
-
-  statusChipText: {
-    color: BRAND.dark,
-    fontSize: 10,
-    fontWeight: "700",
-  },
-
-  statusChipTextActive: {
-    color: BRAND.white,
-  },
-
-  timeline: {
-    marginTop: 14,
-    backgroundColor: BRAND.white,
-    borderRadius: 15,
-    borderWidth: 1,
-    borderColor: BRAND.border,
-    padding: 14,
-  },
-
-  timelineRow: {
+  flowItem: {
     flexDirection: "row",
-    minHeight: 64,
+    minHeight: 65,
   },
 
-  timelineRail: {
-    width: 28,
+  flowIndicatorColumn: {
+    width: 32,
     alignItems: "center",
   },
 
-  timelineDot: {
-    width: 21,
-    height: 21,
-    borderRadius: 11,
-    borderWidth: 2,
-    borderColor: "#D9CDD2",
-    backgroundColor: BRAND.white,
+  flowCircle: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: colors.White,
+    borderWidth: 1.5,
+    borderColor: colors.Border,
     alignItems: "center",
     justifyContent: "center",
     zIndex: 2,
   },
 
-  timelineDotCompleted: {
-    borderColor: BRAND.wine,
-    backgroundColor: BRAND.wine,
-  },
-
-  timelineDotActive: {
-    borderColor: BRAND.gold,
-  },
-
-  timelineCheck: {
-    color: BRAND.white,
-    fontSize: 10,
+  flowCircleText: {
+    color: colors.Gray,
+    fontSize: 9,
     fontWeight: "900",
   },
 
-  timelineLine: {
-    position: "absolute",
-    top: 20,
-    bottom: 0,
+  flowCircleTextCompleted: {
+    color: colors.White,
+  },
+
+  flowLine: {
     width: 2,
-    backgroundColor: "#E8DDE1",
-  },
-
-  timelineLineCompleted: {
-    backgroundColor: BRAND.wine,
-  },
-
-  timelineContent: {
     flex: 1,
-    paddingLeft: 9,
-    paddingBottom: 13,
+    backgroundColor: "#F8BBD0",
+    marginVertical: -1,
   },
 
-  timelineTitle: {
-    color: BRAND.dark,
-    fontSize: 12,
-    fontWeight: "800",
+  flowContent: {
+    flex: 1,
+    marginLeft: 9,
+    marginBottom: 8,
+    padding: 9,
+    borderRadius: 11,
+    backgroundColor: "#FFF5F8",
   },
 
-  timelineTitleActive: {
-    color: BRAND.wine,
-  },
-
-  timelineDescription: {
-    color: BRAND.muted,
-    fontSize: 10,
-    lineHeight: 15,
-    marginTop: 2,
-  },
-
-  currentStatusLabel: {
-    alignSelf: "flex-start",
-    backgroundColor: BRAND.softPink,
-    borderRadius: 8,
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-    marginTop: 5,
-  },
-
-  currentStatusLabelText: {
-    color: BRAND.magenta,
-    fontSize: 8,
-    fontWeight: "800",
-  },
-
-  measurementCard: {
-    backgroundColor: BRAND.white,
-    borderRadius: 15,
+  flowContentActive: {
+    backgroundColor: colors.SoftPink,
     borderWidth: 1,
-    borderColor: BRAND.border,
-    padding: 13,
+    borderColor: "#F8BBD0",
   },
 
-  measurementHeader: {
+  flowTextRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingBottom: 11,
-    borderBottomWidth: 1,
-    borderBottomColor: "#F0E7EA",
   },
 
-  measurementTitle: {
-    color: BRAND.dark,
+  flowTitleBox: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+
+  flowStatusIcon: {
     fontSize: 13,
-    fontWeight: "800",
+    marginRight: 6,
   },
 
-  measurementDate: {
-    color: BRAND.muted,
-    fontSize: 10,
-    marginTop: 3,
+  flowStatusText: {
+    color: colors.DarkText,
+    fontSize: 11,
+    fontWeight: "900",
   },
 
-  snapshotBadge: {
-    backgroundColor: "#EAF4ED",
-    borderRadius: 9,
-    paddingHorizontal: 7,
-    paddingVertical: 4,
-  },
-
-  snapshotBadgeText: {
-    color: BRAND.green,
+  flowStepText: {
+    color: colors.Gray,
     fontSize: 8,
     fontWeight: "800",
   },
 
-  measurementGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    paddingTop: 8,
+  flowStepTextActive: {
+    color: colors.PrimaryWine,
   },
 
-  measurementValue: {
-    width: "25%",
+  flowDescription: {
+    color: colors.Gray,
+    fontSize: 8,
+    marginTop: 4,
+    lineHeight: 12,
+  },
+
+  deliveryStatusCard: {
+    backgroundColor: colors.White,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: colors.Border,
+    padding: 14,
+    marginBottom: 11,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+
+  deliveryStatusLeft: {
+    flex: 1,
+  },
+
+  deliveryStatusLabel: {
+    color: colors.Gray,
+    fontSize: 8,
+    fontWeight: "900",
+    letterSpacing: 0.6,
+  },
+
+  deliveryStatusDate: {
+    color: colors.DarkText,
+    fontSize: 15,
+    fontWeight: "900",
+    marginTop: 4,
+  },
+
+  deliveryInfoBadge: {
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+    marginLeft: 10,
+  },
+
+  deliveryInfoBadgeText: {
+    fontSize: 9,
+    fontWeight: "900",
+  },
+
+  detailsSection: {
+    backgroundColor: colors.White,
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: colors.Border,
+    padding: 14,
+    marginBottom: 11,
+  },
+
+  detailsSectionTitle: {
+    color: colors.DarkText,
+    fontSize: 14,
+    fontWeight: "900",
     marginBottom: 10,
   },
 
-  measurementLabel: {
-    color: BRAND.muted,
-    fontSize: 8,
+  detailRow: {
+    flexDirection: "row",
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: "#F8BBD0",
   },
 
-  measurementNumber: {
-    color: BRAND.dark,
-    fontSize: 12,
+  detailLabel: {
+    width: "40%",
+    color: colors.Gray,
+    fontSize: 10,
+  },
+
+  detailValue: {
+    flex: 1,
+    color: colors.DarkText,
+    fontSize: 11,
     fontWeight: "800",
-    marginTop: 2,
+    textAlign: "right",
   },
 
-  measurementNotes: {
-    marginTop: 4,
-    backgroundColor: "#FAF6F8",
+  snapshotGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+
+  snapshotItem: {
+    width: "31%",
+    backgroundColor: colors.Cream,
     borderRadius: 10,
     padding: 9,
   },
 
-  measurementNotesLabel: {
-    color: BRAND.wine,
-    fontSize: 9,
-    fontWeight: "800",
+  snapshotLabel: {
+    color: colors.Gray,
+    fontSize: 8,
   },
 
-  measurementNotesText: {
-    color: BRAND.dark,
-    fontSize: 10,
-    lineHeight: 15,
+  snapshotValue: {
+    color: colors.DarkText,
+    fontSize: 12,
+    fontWeight: "900",
     marginTop: 3,
   },
 
-  emptyMeasurement: {
-    backgroundColor: BRAND.white,
-    borderRadius: 15,
-    borderWidth: 1,
-    borderColor: BRAND.border,
-    padding: 20,
-    alignItems: "center",
-  },
-
-  emptyMeasurementIcon: {
-    fontSize: 25,
-  },
-
-  emptyMeasurementTitle: {
-    color: BRAND.dark,
-    fontSize: 13,
-    fontWeight: "800",
-    marginTop: 7,
-  },
-
-  emptyMeasurementText: {
-    color: BRAND.muted,
-    fontSize: 10,
-    textAlign: "center",
-    lineHeight: 15,
-    marginTop: 4,
-  },
-
-  infoBox: {
-    backgroundColor: BRAND.white,
-    borderRadius: 13,
-    borderWidth: 1,
-    borderColor: BRAND.border,
-    padding: 12,
-  },
-
-  infoBoxText: {
-    color: BRAND.dark,
+  detailsNotes: {
+    color: colors.DarkText,
     fontSize: 12,
-    lineHeight: 18,
+    lineHeight: 19,
+  },
+
+  editOrderButton: {
+    minHeight: 49,
+    backgroundColor: colors.PrimaryWine,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 2,
+  },
+
+  deleteOrderButton: {
+    minHeight: 49,
+    backgroundColor: "#FFF5F8",
+    borderWidth: 1,
+    borderColor: "#F8BBD0",
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 8,
+  },
+
+  editOrderText: {
+    color: colors.White,
+    fontWeight: "900",
+  },
+
+  deleteOrderText: {
+    color: colors.PrimaryWine,
+    fontWeight: "900",
   },
 
   closeDetailsButton: {
-    marginTop: 20,
-    height: 47,
-    borderRadius: 13,
+    minHeight: 46,
+    backgroundColor: colors.White,
     borderWidth: 1,
-    borderColor: BRAND.wine,
+    borderColor: colors.Border,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 8,
+    marginBottom: 8,
+  },
+
+  garmentChipRow: {
+    flexDirection: "row",
+    gap: 8,
+    paddingVertical: 10,
+  },
+  garmentChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: colors.Border,
+    backgroundColor: colors.Cream,
+  },
+  garmentChipActive: {
+    backgroundColor: colors.PrimaryWine,
+    borderColor: colors.PrimaryWine,
+  },
+  garmentChipText: {
+    color: colors.DarkText,
+    fontWeight: "600",
+  },
+  garmentChipTextActive: {
+    color: "#FFFFFF",
+  },
+
+  sketchSection: {
+    marginTop: 18,
+    marginBottom: 20,
+    padding: 16,
+    borderRadius: 18,
+    backgroundColor: "#FFF5F8",
+    borderWidth: 1,
+    borderColor: "#F8BBD0",
+    gap: 12,
+  },
+
+  sketchToolbar: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+
+  sketchToolButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 20,
+    backgroundColor: "#FCE5EF",
+    borderWidth: 1,
+    borderColor: "#F8BBD0",
+  },
+
+  sketchToolButtonActive: {
+    backgroundColor: "#C2185B",
+    borderColor: "#C2185B",
+  },
+
+  sketchToolText: {
+    color: "#C2185B",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+
+  sketchCanvas: {
+    height: 240,
+    overflow: "hidden",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#F8BBD0",
+    backgroundColor: "#FFFFFF",
+  },
+
+  enhancedSketchPreview: {
+    marginTop: 8,
+    padding: 12,
+    borderRadius: 14,
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#F8BBD0",
+  },
+
+  enhancedSketchImage: {
+    width: "100%",
+    height: 220,
+    borderRadius: 10,
+    backgroundColor: "#FFFFFF",
+  },
+
+  sketchHint: {
+    fontSize: 12,
+    color: "#8E4565",
+    marginBottom: 8,
+  },
+
+  fabricPickerButton: {
+    alignSelf: "flex-start",
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: "#C2185B",
+  },
+
+  fabricPickerText: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+
+  fabricPhotoRow: {
+    flexDirection: "row",
+    gap: 12,
+    paddingVertical: 8,
+  },
+
+  fabricPhotoWrapper: {
+    width: 100,
+    height: 110,
+    position: "relative",
+  },
+
+  fabricPhoto: {
+    width: 100,
+    height: 110,
+    borderRadius: 12,
+    backgroundColor: "#FCE5EF",
+  },
+
+  removeFabricPhoto: {
+    position: "absolute",
+    top: 4,
+    right: 4,
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: "#C2185B",
     alignItems: "center",
     justifyContent: "center",
   },
 
-  closeDetailsButtonText: {
-    color: BRAND.wine,
-    fontSize: 13,
+  removeFabricPhotoText: {
+    color: "#FFFFFF",
+    fontSize: 20,
+    fontWeight: "700",
+    lineHeight: 22,
+  },
+  closeDetailsText: {
+    color: colors.DarkText,
     fontWeight: "800",
   },
+  photoGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+  },
+
+  orderFabricImage: {
+    width: 90,
+    height: 90,
+    borderRadius: 12,
+    backgroundColor: "#FCE5EF",
+  },
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

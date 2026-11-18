@@ -1,7 +1,9 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
 import {
   Alert,
   Modal,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -12,11 +14,7 @@ import {
 
 import type { Measurement } from "./measurements/MeasurementsScreen";
 import type { Order, OrderStatus } from "./OrdersScreen";
-import type { Bill, Payment } from "./BillingScreen";
-
-/* =======================================================
-   CUSTOMER TYPE
-======================================================= */
+import type { Bill, Payment } from "../lib/billService";
 
 export type Customer = {
   id: string;
@@ -28,25 +26,292 @@ export type Customer = {
   orders: number;
 };
 
-/* =======================================================
-   PROPS
-======================================================= */
-
 type CustomersScreenProps = {
   customers: Customer[];
   measurements: Record<string, Measurement[]>;
   orders: Order[];
   bills: Bill[];
   payments: Payment[];
-
   onAddCustomer: (customer: Customer) => void;
   onUpdateCustomer: (customer: Customer) => void;
   onOpenMeasurements: (customer: Customer) => void;
+  onOpenOrders: (customer: Customer) => void;
+  onOpenBilling: (customer: Customer) => void;
+  onAddPayment: (customer: Customer) => void;
 };
 
-/* =======================================================
-   COMPONENT
-======================================================= */
+type CustomerFilter = "All" | "Active" | "Due" | "No Orders";
+
+type CustomerStats = {
+  orders: number;
+  activeOrders: number;
+  completedOrders: number;
+  bills: number;
+  paid: number;
+  due: number;
+  measurements: number;
+  totalBilled: number;
+  lastOrderDate: string;
+  nextDeliveryDate: string;
+  latestOrder: Order | null;
+};
+
+const STATUS_LIST: OrderStatus[] = [
+  "New",
+  "Measurement",
+  "Cutting",
+  "Stitching",
+  "Trial",
+  "Ready",
+  "Delivered",
+];
+
+const ACTIVE_STATUSES: OrderStatus[] = [
+  "New",
+  "Measurement",
+  "Cutting",
+  "Stitching",
+  "Trial",
+  "Ready",
+];
+
+const pad2 = (value: number) => String(value).padStart(2, "0");
+
+const localToday = () => {
+  const date = new Date();
+
+  return `${date.getFullYear()}-${pad2(
+    date.getMonth() + 1
+  )}-${pad2(date.getDate())}`;
+};
+
+const normalizeDate = (value?: string) => {
+  if (!value) return "";
+
+  const trimmed = value.trim();
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return trimmed;
+  }
+
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(trimmed)) {
+    const [day, month, year] = trimmed.split("/").map(Number);
+
+    return `${year}-${pad2(month)}-${pad2(day)}`;
+  }
+
+  return trimmed;
+};
+
+const parseDateOnly = (value?: string) => {
+  const normalized = normalizeDate(value);
+
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(normalized);
+
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+
+  const date = new Date(year, month - 1, day);
+
+  if (
+    date.getFullYear() !== year ||
+    date.getMonth() !== month - 1 ||
+    date.getDate() !== day
+  ) {
+    return null;
+  }
+
+  date.setHours(0, 0, 0, 0);
+
+  return date;
+};
+
+const dateLabel = (value?: string) => {
+  if (!value) return "-";
+
+  const date = parseDateOnly(value);
+
+  if (!date) return value;
+
+  return date.toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+};
+
+const formatMoney = (value: number) => {
+  return "Rs. " + Number(value || 0).toLocaleString("en-IN", {
+    maximumFractionDigits: 2,
+  });
+};
+
+const getOrderTotal = (order: Order) => {
+  return Number(order.price || 0) * Number(order.quantity || 0);
+};
+
+const getStatusIndex = (status: OrderStatus) => {
+  return STATUS_LIST.indexOf(status);
+};
+
+const getProgressPercent = (status: OrderStatus) => {
+  const index = getStatusIndex(status);
+
+  if (index < 0) return 0;
+
+  return Math.round(((index + 1) / STATUS_LIST.length) * 100);
+};
+
+const getStatusLabel = (status: OrderStatus) => {
+  return status;
+};
+
+const getStatusSymbol = (status: OrderStatus) => {
+  switch (status) {
+    case "New":
+      return "•";
+    case "Measurement":
+      return "M";
+    case "Cutting":
+      return "C";
+    case "Stitching":
+      return "S";
+    case "Trial":
+      return "T";
+    case "Ready":
+      return "✓";
+    case "Delivered":
+      return "✓";
+    default:
+      return "•";
+  }
+};
+
+const getDeliveryInfo = (order: Order) => {
+  if (order.status === "Delivered") {
+    return {
+      label: "Delivered",
+      tone: "success" as const,
+    };
+  }
+
+  const deliveryDate = parseDateOnly(order.deliveryDate);
+
+  if (!deliveryDate) {
+    return {
+      label: "No delivery date",
+      tone: "neutral" as const,
+    };
+  }
+
+  const todayDate = parseDateOnly(localToday());
+
+  if (!todayDate) {
+    return {
+      label: dateLabel(order.deliveryDate),
+      tone: "neutral" as const,
+    };
+  }
+
+  const difference = Math.round(
+    (deliveryDate.getTime() - todayDate.getTime()) /
+      (1000 * 60 * 60 * 24)
+  );
+
+  if (difference < 0) {
+    return {
+      label: `${Math.abs(difference)}d overdue`,
+      tone: "danger" as const,
+    };
+  }
+
+  if (difference === 0) {
+    return {
+      label: "Due today",
+      tone: "warning" as const,
+    };
+  }
+
+  if (difference === 1) {
+    return {
+      label: "Tomorrow",
+      tone: "warning" as const,
+    };
+  }
+
+  if (difference <= 7) {
+    return {
+      label: `Due in ${difference}d`,
+      tone: "info" as const,
+    };
+  }
+
+  return {
+    label: dateLabel(order.deliveryDate),
+    tone: "neutral" as const,
+  };
+};
+
+const getInitials = (name: string) => {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+
+  if (words.length === 0) return "?";
+
+  if (words.length === 1) {
+    return words[0].slice(0, 2).toUpperCase();
+  }
+
+  return `${words[0][0]}${words[words.length - 1][0]}`.toUpperCase();
+};
+
+const getOrderSearchText = (order: Order) => {
+  return [
+    order.id,
+    order.item,
+    order.status,
+    order.notes,
+    order.orderDate,
+    order.deliveryDate,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+};
+
+const getBillSearchText = (bill: Bill) => {
+  return [
+    bill.id,
+    bill.billNumber,
+    bill.item,
+    bill.status,
+    bill.billDate,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+};
+
+/*
+  Payments do not contain customerId.
+
+  Payment -> billId -> Bill -> customerId
+
+  This helper keeps that relationship in one place.
+*/
+const getPaymentCustomerId = (
+  payment: Payment,
+  bills: Bill[]
+) => {
+  const bill = bills.find(
+    (item) =>
+      String(item.id) === String(payment.billId)
+  );
+
+  return bill?.customerId || "";
+};
 
 export default function CustomersScreen({
   customers,
@@ -57,40 +322,26 @@ export default function CustomersScreen({
   onAddCustomer,
   onUpdateCustomer,
   onOpenMeasurements,
+  onOpenOrders,
+  onOpenBilling,
+  onAddPayment,
 }: CustomersScreenProps) {
-  /* =====================================================
-     SEARCH
-  ===================================================== */
-
   const [search, setSearch] = useState("");
+  const [filter, setFilter] =
+    useState<CustomerFilter>("All");
+  const [refreshing, setRefreshing] = useState(false);
 
-  /* =====================================================
-     MODALS
-  ===================================================== */
+  const [showCustomerModal, setShowCustomerModal] =
+    useState(false);
 
-  const [showAddModal, setShowAddModal] = useState(false);
   const [showProfileModal, setShowProfileModal] =
     useState(false);
-  const [showEditModal, setShowEditModal] =
-    useState(false);
-  const [showHistoryModal, setShowHistoryModal] =
-    useState(false);
-  const [showOrderDetailsModal, setShowOrderDetailsModal] =
-    useState(false);
 
-  /* =====================================================
-     SELECTED CUSTOMER / ORDER
-  ===================================================== */
+  const [editingCustomer, setEditingCustomer] =
+    useState<Customer | null>(null);
 
   const [selectedCustomer, setSelectedCustomer] =
     useState<Customer | null>(null);
-
-  const [selectedOrder, setSelectedOrder] =
-    useState<Order | null>(null);
-
-  /* =====================================================
-     FORM STATE
-  ===================================================== */
 
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
@@ -98,601 +349,1537 @@ export default function CustomersScreen({
   const [address, setAddress] = useState("");
   const [notes, setNotes] = useState("");
 
-  /* =====================================================
-     FILTER CUSTOMERS
-  ===================================================== */
+  const customerStats = useMemo(() => {
+    const map: Record<string, CustomerStats> = {};
 
-  const filteredCustomers = customers.filter(
-    (customer) => {
-      const query = search.trim().toLowerCase();
-
-      if (!query) {
-        return true;
-      }
-
-      return (
-        customer.name
-          .toLowerCase()
-          .includes(query) ||
-        customer.phone
-          .toLowerCase()
-          .includes(query) ||
-        customer.id
-          .toLowerCase()
-          .includes(query)
-      );
-    }
-  );
-
-  /* =====================================================
-     CUSTOMER HISTORY DATA
-  ===================================================== */
-
-  const customerOrders = selectedCustomer
-    ? orders.filter(
+    customers.forEach((customer) => {
+      const customerOrders = orders.filter(
         (order) =>
-          order.customerId === selectedCustomer.id
-      )
-    : [];
+          String(order.customerId) ===
+          String(customer.id)
+      );
 
-  const customerBills = selectedCustomer
-    ? bills.filter(
+      const customerBills = bills.filter(
         (bill) =>
-          bill.customerId === selectedCustomer.id
-      )
-    : [];
+          String(bill.customerId) ===
+          String(customer.id)
+      );
 
-  const customerPayments = selectedCustomer
-    ? payments.filter((payment) =>
-        customerBills.some(
-          (bill) => bill.id === payment.billId
-        )
-      )
-    : [];
-
-  const customerMeasurements = selectedCustomer
-    ? measurements[selectedCustomer.id] || []
-    : [];
-
-  const totalBilled = customerBills.reduce(
-    (total, bill) =>
-      total + Number(bill.total || 0),
-    0
-  );
-
-  const totalPaid = customerPayments.reduce(
-    (total, payment) =>
-      total + Number(payment.amount || 0),
-    0
-  );
-
-  const totalPending = Math.max(
-    totalBilled - totalPaid,
-    0
-  );
-
-  const latestMeasurement =
-    customerMeasurements.length > 0
-      ? customerMeasurements[
-          customerMeasurements.length - 1
-        ]
-      : null;
-
-  /* =====================================================
-     SELECTED ORDER DATA
-  ===================================================== */
-
-  const selectedOrderBill = selectedOrder
-    ? bills.find(
-        (bill) =>
-          bill.orderId === selectedOrder.id
-      ) || null
-    : null;
-
-  const selectedOrderPayments = selectedOrderBill
-    ? payments.filter(
+      const customerPayments = payments.filter(
         (payment) =>
-          payment.billId === selectedOrderBill.id
-      )
-    : [];
+          String(
+            getPaymentCustomerId(payment, bills)
+          ) === String(customer.id)
+      );
 
-  const selectedOrderMeasurement =
-    selectedOrder?.measurementSnapshot || null;
+      const customerMeasurements =
+        measurements[customer.id] || [];
 
-  /* =====================================================
-     OPEN CUSTOMER PROFILE
-  ===================================================== */
+      const activeOrders = customerOrders.filter(
+        (order) =>
+          ACTIVE_STATUSES.includes(order.status)
+      );
 
-  function openCustomerProfile(
+      const completedOrders =
+        customerOrders.filter(
+          (order) =>
+            order.status === "Delivered"
+        );
+
+      const totalBilled =
+        customerBills.reduce(
+          (sum, bill) =>
+            sum + Number(bill.total || 0),
+          0
+        );
+
+      const paidFromBills =
+        customerBills.reduce(
+          (sum, bill) =>
+            sum + Number(bill.paidAmount || 0),
+          0
+        );
+
+      const paidFromPayments =
+        customerPayments.reduce(
+          (sum, payment) =>
+            sum + Number(payment.amount || 0),
+          0
+        );
+
+      const paid = Math.max(
+        paidFromBills,
+        paidFromPayments
+      );
+
+      const dueFromBills =
+        customerBills.reduce(
+          (sum, bill) =>
+            sum + Number(bill.balance || 0),
+          0
+        );
+
+      const due = Math.max(
+        0,
+        totalBilled - paid,
+        dueFromBills
+      );
+
+      const sortedOrders =
+        [...customerOrders].sort(
+          (a, b) => {
+            const dateA =
+              parseDateOnly(
+                a.orderDate
+              )?.getTime() || 0;
+
+            const dateB =
+              parseDateOnly(
+                b.orderDate
+              )?.getTime() || 0;
+
+            return dateB - dateA;
+          }
+        );
+
+      const latestOrder =
+        sortedOrders.length > 0
+          ? sortedOrders[0]
+          : null;
+
+      const activeWithDelivery =
+        activeOrders
+          .filter((order) =>
+            parseDateOnly(
+              order.deliveryDate
+            )
+          )
+          .sort((a, b) => {
+            const dateA =
+              parseDateOnly(
+                a.deliveryDate
+              )?.getTime() || 0;
+
+            const dateB =
+              parseDateOnly(
+                b.deliveryDate
+              )?.getTime() || 0;
+
+            return dateA - dateB;
+          });
+
+      const lastOrderDate =
+        latestOrder?.orderDate || "";
+
+      const nextDeliveryDate =
+        activeWithDelivery[0]
+          ?.deliveryDate || "";
+
+      return {
+        orders: customerOrders.length,
+        activeOrders: activeOrders.length,
+        completedOrders:
+          completedOrders.length,
+        bills: customerBills.length,
+        paid,
+        due,
+        measurements:
+          customerMeasurements.length,
+        totalBilled,
+        lastOrderDate,
+        nextDeliveryDate,
+        latestOrder,
+      };
+    });
+
+    return map;
+  }, [
+    customers,
+    orders,
+    bills,
+    payments,
+    measurements,
+  ]);
+
+  const overallStats = useMemo(() => {
+    const totalDue =
+      bills.reduce(
+        (sum, bill) =>
+          sum + Number(bill.balance || 0),
+        0
+      );
+
+    const totalPaid =
+      bills.reduce(
+        (sum, bill) =>
+          sum + Number(bill.paidAmount || 0),
+        0
+      );
+
+    const totalBilled =
+      bills.reduce(
+        (sum, bill) =>
+          sum + Number(bill.total || 0),
+        0
+      );
+
+    const activeOrders =
+      orders.filter((order) =>
+        ACTIVE_STATUSES.includes(
+          order.status
+        )
+      ).length;
+
+    const completedOrders =
+      orders.filter(
+        (order) =>
+          order.status === "Delivered"
+      ).length;
+
+    const customersWithDue =
+      customers.filter(
+        (customer) =>
+          Number(
+            customerStats[
+              customer.id
+            ]?.due || 0
+          ) > 0
+      ).length;
+
+    return {
+      totalDue,
+      totalPaid,
+      totalBilled,
+      activeOrders,
+      completedOrders,
+      customersWithDue,
+    };
+  }, [
+    customers,
+    orders,
+    bills,
+    customerStats,
+  ]);
+
+  const filteredCustomers = useMemo(() => {
+    const query =
+      search.trim().toLowerCase();
+
+    return customers
+      .filter((customer) => {
+        const stats =
+          customerStats[customer.id];
+
+        if (filter === "Active") {
+          return Boolean(
+            stats?.activeOrders
+          );
+        }
+
+        if (filter === "Due") {
+          return (
+            Number(stats?.due || 0) > 0
+          );
+        }
+
+        if (filter === "No Orders") {
+          return (
+            Number(stats?.orders || 0) ===
+            0
+          );
+        }
+
+        return true;
+      })
+      .filter((customer) => {
+        if (!query) return true;
+
+        const customerText = [
+          customer.name,
+          customer.phone,
+          customer.email,
+          customer.address,
+          customer.notes,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+
+        const customerOrders =
+          orders.filter(
+            (order) =>
+              String(
+                order.customerId
+              ) === String(customer.id)
+          );
+
+        const customerBills =
+          bills.filter(
+            (bill) =>
+              String(
+                bill.customerId
+              ) === String(customer.id)
+          );
+
+        const orderText =
+          customerOrders
+            .map(getOrderSearchText)
+            .join(" ");
+
+        const billText =
+          customerBills
+            .map(getBillSearchText)
+            .join(" ");
+
+        return `${customerText} ${orderText} ${billText}`.includes(
+          query
+        );
+      })
+      .sort((a, b) => {
+        const dateA =
+          parseDateOnly(
+            customerStats[a.id]
+              ?.lastOrderDate
+          )?.getTime() || 0;
+
+        const dateB =
+          parseDateOnly(
+            customerStats[b.id]
+              ?.lastOrderDate
+          )?.getTime() || 0;
+
+        if (dateA !== dateB) {
+          return dateB - dateA;
+        }
+
+        return a.name.localeCompare(
+          b.name
+        );
+      });
+  }, [
+    customers,
+    search,
+    filter,
+    customerStats,
+    orders,
+    bills,
+  ]);
+
+  const openAddCustomer = () => {
+    setEditingCustomer(null);
+    setName("");
+    setPhone("");
+    setEmail("");
+    setAddress("");
+    setNotes("");
+    setShowCustomerModal(true);
+  };
+
+  const openEditCustomer = (
     customer: Customer
-  ) {
+  ) => {
+    setEditingCustomer(customer);
+    setName(customer.name);
+    setPhone(customer.phone);
+    setEmail(customer.email);
+    setAddress(customer.address);
+    setNotes(customer.notes);
+    setShowCustomerModal(true);
+  };
+
+  const saveCustomer = () => {
+    const cleanName =
+      name.trim();
+
+    const cleanPhone =
+      phone.trim();
+if (!cleanPhone) {
+      Alert.alert(
+        "Phone Required",
+        "Please enter customer phone number."
+      );
+      return;
+    }
+
+    const customer: Customer = {
+      id:
+        editingCustomer?.id ||
+        `CUS-${Date.now()
+          .toString()
+          .slice(-8)}`,
+
+      name: cleanName,
+      phone: cleanPhone,
+      email: email.trim(),
+      address: address.trim(),
+      notes: notes.trim(),
+
+      orders:
+        editingCustomer?.orders || 0,
+    };
+
+    if (editingCustomer) {
+      onUpdateCustomer(customer);
+    } else {
+      onAddCustomer(customer);
+    }
+
+    setShowCustomerModal(false);
+  };
+
+  const openProfile = (
+    customer: Customer
+  ) => {
     setSelectedCustomer(customer);
     setShowProfileModal(true);
-  }
+  };
 
-  /* =====================================================
-     OPEN CUSTOMER HISTORY
-  ===================================================== */
-
-  function openCustomerHistory() {
+  const closeProfile = () => {
     setShowProfileModal(false);
+  };
+
+  const refreshCustomers = () => {
+    setRefreshing(true);
 
     setTimeout(() => {
-      setShowHistoryModal(true);
-    }, 150);
-  }
+      setRefreshing(false);
+    }, 500);
+  };
 
-  /* =====================================================
-     OPEN ORDER DETAILS
-  ===================================================== */
+  const selectedStats =
+  selectedCustomer
+    ? customerStats[selectedCustomer.id] ?? {
+        orders: 0,
+        activeOrders: 0,
+        completedOrders: 0,
+        bills: 0,
+        paid: 0,
+        due: 0,
+        measurements: 0,
+        totalBilled: 0,
+        lastOrderDate: "",
+        nextDeliveryDate: "",
+        latestOrder: null,
+      }
+    : null;
 
-  function openOrderDetails(order: Order) {
-    setSelectedOrder(order);
-    setShowHistoryModal(false);
+  const selectedOrders =
+    selectedCustomer
+      ? orders
+          .filter(
+            (order) =>
+              String(
+                order.customerId
+              ) ===
+              String(
+                selectedCustomer.id
+              )
+          )
+          .sort((a, b) => {
+            const dateA =
+              parseDateOnly(
+                a.orderDate
+              )?.getTime() || 0;
 
-    setTimeout(() => {
-      setShowOrderDetailsModal(true);
-    }, 150);
-  }
+            const dateB =
+              parseDateOnly(
+                b.orderDate
+              )?.getTime() || 0;
 
-  /* =====================================================
-     CLOSE ORDER DETAILS
-  ===================================================== */
+            return dateB - dateA;
+          })
+      : [];
 
-  function closeOrderDetails() {
-    setShowOrderDetailsModal(false);
+  const selectedBills =
+    selectedCustomer
+      ? bills
+          .filter(
+            (bill) =>
+              String(
+                bill.customerId
+              ) ===
+              String(
+                selectedCustomer.id
+              )
+          )
+          .sort((a, b) => {
+            const dateA =
+              parseDateOnly(
+                a.billDate
+              )?.getTime() || 0;
 
-    setTimeout(() => {
-      setShowHistoryModal(true);
-    }, 150);
-  }
+            const dateB =
+              parseDateOnly(
+                b.billDate
+              )?.getTime() || 0;
 
-  /* =====================================================
-     OPEN ADD CUSTOMER
-  ===================================================== */
+            return dateB - dateA;
+          })
+      : [];
 
-  function openAddCustomer() {
-    setName("");
-    setPhone("");
-    setEmail("");
-    setAddress("");
-    setNotes("");
+  /*
+    Payment does not have customerId.
 
-    setShowAddModal(true);
-  }
+    Filter payment records using:
+    payment.billId -> bill.id -> bill.customerId
+  */
+  const selectedPayments =
+    selectedCustomer
+      ? payments
+          .filter(
+            (payment) =>
+              String(
+                getPaymentCustomerId(
+                  payment,
+                  bills
+                )
+              ) ===
+              String(
+                selectedCustomer.id
+              )
+          )
+          .sort((a, b) => {
+            const dateA =
+              parseDateOnly(
+                a.paymentDate
+              )?.getTime() || 0;
 
-  /* =====================================================
-     CREATE CUSTOMER
-  ===================================================== */
+            const dateB =
+              parseDateOnly(
+                b.paymentDate
+              )?.getTime() || 0;
 
-  function handleCreateCustomer() {
-    if (!name.trim()) {
-      Alert.alert(
-        "Name Required",
-        "Please enter the customer name."
-      );
-      return;
+            return dateB - dateA;
+          })
+      : [];
+
+  const selectedMeasurements =
+    selectedCustomer
+      ? measurements[
+          selectedCustomer.id
+        ] || []
+      : [];
+
+  const getCustomerHealth = (
+    stats: CustomerStats
+  ) => {
+    if (
+      stats.due > 0 &&
+      stats.activeOrders > 0
+    ) {
+      return {
+        label: "Attention",
+        symbol: "!",
+        type: "warning" as const,
+      };
     }
 
-    if (!phone.trim()) {
-      Alert.alert(
-        "Phone Required",
-        "Please enter the customer phone number."
-      );
-      return;
+    if (stats.due > 0) {
+      return {
+        label: "Payment Due",
+        symbol: "₹",
+        type: "danger" as const,
+      };
     }
 
-    const newCustomer: Customer = {
-      id: `CUS-${Date.now()}`,
-      name: name.trim(),
-      phone: phone.trim(),
-      email: email.trim(),
-      address: address.trim(),
-      notes: notes.trim(),
-      orders: 0,
+    if (stats.activeOrders > 0) {
+      return {
+        label: "Active",
+        symbol: "●",
+        type: "info" as const,
+      };
+    }
+
+    if (stats.orders > 0) {
+      return {
+        label: "Completed",
+        symbol: "✓",
+        type: "success" as const,
+      };
+    }
+
+    return {
+      label: "New",
+      symbol: "+",
+      type: "neutral" as const,
     };
-
-    onAddCustomer(newCustomer);
-
-    setShowAddModal(false);
-
-    setName("");
-    setPhone("");
-    setEmail("");
-    setAddress("");
-    setNotes("");
-
-    Alert.alert(
-      "Customer Added",
-      `${newCustomer.name} has been added successfully.`
-    );
-  }
-
-  /* =====================================================
-     OPEN EDIT CUSTOMER
-  ===================================================== */
-
-  function openEditCustomer() {
-    if (!selectedCustomer) {
-      return;
-    }
-
-    setName(selectedCustomer.name);
-    setPhone(selectedCustomer.phone);
-    setEmail(selectedCustomer.email);
-    setAddress(selectedCustomer.address);
-    setNotes(selectedCustomer.notes);
-
-    setShowProfileModal(false);
-
-    setTimeout(() => {
-      setShowEditModal(true);
-    }, 150);
-  }
-
-  /* =====================================================
-     UPDATE CUSTOMER
-  ===================================================== */
-
-  function handleUpdateCustomer() {
-    if (!selectedCustomer) {
-      return;
-    }
-
-    if (!name.trim()) {
-      Alert.alert(
-        "Name Required",
-        "Please enter the customer name."
-      );
-      return;
-    }
-
-    if (!phone.trim()) {
-      Alert.alert(
-        "Phone Required",
-        "Please enter the customer phone number."
-      );
-      return;
-    }
-
-    const updatedCustomer: Customer = {
-      ...selectedCustomer,
-      name: name.trim(),
-      phone: phone.trim(),
-      email: email.trim(),
-      address: address.trim(),
-      notes: notes.trim(),
-    };
-
-    onUpdateCustomer(updatedCustomer);
-
-    setSelectedCustomer(updatedCustomer);
-
-    setShowEditModal(false);
-
-    setTimeout(() => {
-      setShowProfileModal(true);
-    }, 150);
-
-    Alert.alert(
-      "Customer Updated",
-      "Customer details have been updated."
-    );
-  }
-
-  /* =====================================================
-     CLOSE PROFILE
-  ===================================================== */
-
-  function closeProfile() {
-    setShowProfileModal(false);
-    setSelectedCustomer(null);
-  }
-
-  /* =====================================================
-     CLOSE HISTORY
-  ===================================================== */
-
-  function closeHistory() {
-    setShowHistoryModal(false);
-    setSelectedCustomer(null);
-  }
-
-  /* =====================================================
-     OPEN MEASUREMENTS
-  ===================================================== */
-
-  function handleOpenMeasurements() {
-    if (!selectedCustomer) {
-      return;
-    }
-
-    setShowProfileModal(false);
-    setShowHistoryModal(false);
-
-    onOpenMeasurements(selectedCustomer);
-  }
-
-  /* =====================================================
-     FORMAT CURRENCY
-  ===================================================== */
-
-  function formatCurrency(
-    amount: number
-  ) {
-    return `₹${Number(
-      amount || 0
-    ).toLocaleString("en-IN")}`;
-  }
-
-  /* =====================================================
-     ORDER STATUS STEP
-  ===================================================== */
-
-  const statusSteps: OrderStatus[] = [
-    "Pending",
-    "In Progress",
-    "Ready",
-    "Delivered",
-  ];
-
-  function getStatusIndex(
-    status: OrderStatus
-  ) {
-    return statusSteps.indexOf(status);
-  }
-
-  /* =====================================================
-     RENDER
-  ===================================================== */
+  };
 
   return (
     <View style={styles.container}>
-      {/* =================================================
-          HEADER
-      ================================================= */}
-
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.title}>
-            Customers
-          </Text>
-
-          <Text style={styles.subtitle}>
-            Manage your customers and their history
-          </Text>
-        </View>
-
-        <TouchableOpacity
-          style={styles.addButton}
-          onPress={openAddCustomer}
-        >
-          <Text style={styles.addButtonText}>
-            + Add
-          </Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* =================================================
-          SEARCH
-      ================================================= */}
-
-      <View style={styles.searchContainer}>
-        <Text style={styles.searchIcon}>
-          🔍
-        </Text>
-
-        <TextInput
-          value={search}
-          onChangeText={setSearch}
-          placeholder="Search by name, phone or ID"
-          placeholderTextColor="#999"
-          style={styles.searchInput}
-        />
-      </View>
-
-      {/* =================================================
-          CUSTOMER COUNT
-      ================================================= */}
-
-      <View style={styles.countRow}>
-        <Text style={styles.countText}>
-          {filteredCustomers.length}{" "}
-          {filteredCustomers.length === 1
-            ? "Customer"
-            : "Customers"}
-        </Text>
-
-        {search.trim().length > 0 && (
-          <Text style={styles.searchResultText}>
-            Search results
-          </Text>
-        )}
-      </View>
-
-      {/* =================================================
-          CUSTOMER LIST
-      ================================================= */}
-
       <ScrollView
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={
+              refreshCustomers
+            }
+          />
+        }
         contentContainerStyle={
-          styles.listContent
+          styles.content
         }
       >
-        {filteredCustomers.length === 0 ? (
-          <View style={styles.emptyState}>
-            <Text style={styles.emptyIcon}>
-              👥
+        {/* HEADER */}
+        <View style={styles.header}>
+          <View style={styles.headerText}>
+            <Text style={styles.eyebrow}>
+              CUSTOMER MANAGEMENT
             </Text>
 
-            <Text style={styles.emptyTitle}>
+            <Text style={styles.title}>
+              Customers
+            </Text>
+
+            <Text style={styles.subtitle}>
+              Track customers, orders,
+              measurements and payments.
+            </Text>
+          </View>
+
+          <TouchableOpacity
+            style={styles.addButton}
+            activeOpacity={0.85}
+            onPress={
+              openAddCustomer
+            }
+          >
+            <Text
+              style={
+                styles.addButtonPlus
+              }
+            >
+              +
+            </Text>
+
+            <Text
+              style={
+                styles.addButtonText
+              }
+            >
+              Add Customer
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* FINANCIAL SUMMARY */}
+        <View style={styles.financeCard}>
+          <View
+            style={styles.financeHeader}
+          >
+            <View>
+              <Text
+                style={styles.financeTitle}
+              >
+                Financial Overview
+              </Text>
+
+              <Text
+                style={
+                  styles.financeSubtitle
+                }
+              >
+                Billed vs collected
+              </Text>
+            </View>
+
+            <Text
+              style={styles.financeTotal}
+            >
+              {formatMoney(
+                overallStats.totalBilled
+              )}
+            </Text>
+          </View>
+
+          <View style={styles.financeRow}>
+            <View
+              style={styles.financeItem}
+            >
+              <Text
+                style={
+                  styles.financeItemLabel
+                }
+              >
+                Total Billed
+              </Text>
+
+              <Text
+                style={
+                  styles.financeItemValue
+                }
+              >
+                {formatMoney(
+                  overallStats.totalBilled
+                )}
+              </Text>
+            </View>
+
+            <View
+              style={styles.financeDivider}
+            />
+
+            <View
+              style={styles.financeItem}
+            >
+              <Text
+                style={
+                  styles.financeItemLabel
+                }
+              >
+                Collected
+              </Text>
+
+              <Text
+                style={[
+                  styles.financeItemValue,
+                  styles.paidText,
+                ]}
+              >
+                {formatMoney(
+                  overallStats.totalPaid
+                )}
+              </Text>
+            </View>
+
+            <View
+              style={styles.financeDivider}
+            />
+
+            <View
+              style={styles.financeItem}
+            >
+              <Text
+                style={
+                  styles.financeItemLabel
+                }
+              >
+                Due
+              </Text>
+
+              <Text
+                style={[
+                  styles.financeItemValue,
+                  styles.dueText,
+                ]}
+              >
+                {formatMoney(
+                  overallStats.totalDue
+                )}
+              </Text>
+            </View>
+          </View>
+        </View>
+
+        {/* SEARCH */}
+        <View
+          style={
+            styles.searchContainer
+          }
+        >
+          <MaterialCommunityIcons
+            name="magnify"
+            size={23}
+            color="#C2185B"
+            style={{ marginRight: 8 }}
+          />
+
+          <TextInput
+            value={search}
+            onChangeText={setSearch}
+            placeholder="Search customer, phone, order or bill..."
+            placeholderTextColor="#A18D96"
+            style={styles.searchInput}
+          />
+
+          {search.length > 0 && (
+            <TouchableOpacity
+              onPress={() =>
+                setSearch("")
+              }
+              style={
+                styles.clearSearch
+              }
+            >
+              <Text
+                style={
+                  styles.clearSearchText
+                }
+              >
+                ×
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {/* FILTERS */}
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={
+            false
+          }
+          contentContainerStyle={
+            styles.filterRow
+          }
+        >
+          {[
+            "All",
+            "Active",
+            "Due",
+            "No Orders",
+          ].map((item) => {
+            const active =
+              filter === item;
+
+            return (
+              <TouchableOpacity
+                key={item}
+                style={[
+                  styles.filterChip,
+                  active &&
+                    styles.filterChipActive,
+                ]}
+                onPress={() =>
+                  setFilter(
+                    item as CustomerFilter
+                  )
+                }
+                activeOpacity={0.8}
+              >
+                <Text
+                  style={[
+                    styles.filterChipText,
+                    active &&
+                      styles.filterChipTextActive,
+                  ]}
+                >
+                  {item}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
+
+        {/* LIST HEADER */}
+        <View style={styles.listHeader}>
+          <View>
+            <Text
+              style={
+                styles.sectionTitle
+              }
+            >
+              Customer List
+            </Text>
+
+            <Text
+              style={
+                styles.sectionSubtitle
+              }
+            >
+              {filteredCustomers.length}{" "}
+              customer
+              {filteredCustomers.length ===
+              1
+                ? ""
+                : "s"}
+              {filter !== "All"
+                ? `• ${filter}`
+                : ""}
+            </Text>
+          </View>
+        </View>
+
+        {/* CUSTOMER LIST */}
+        {filteredCustomers.length ===
+        0 ? (
+          <View
+            style={styles.emptyCard}
+          >
+            <Text
+              style={styles.emptyIcon}
+            >
+●‹
+            </Text>
+
+            <Text
+              style={styles.emptyTitle}
+            >
               No customers found
             </Text>
 
-            <Text style={styles.emptyText}>
-              Try another search or add a new
-              customer.
+            <Text
+              style={styles.emptyText}
+            >
+              {search
+                ? "Try a different search term."
+                : filter !== "All"
+                ? `There are no ${filter.toLowerCase()} customers.`
+                : "Add your first customer to get started."}
             </Text>
 
-            <TouchableOpacity
-              style={styles.emptyButton}
-              onPress={openAddCustomer}
-            >
-              <Text style={styles.emptyButtonText}>
-                + Add Customer
-              </Text>
-            </TouchableOpacity>
-          </View>
-        ) : (
-          filteredCustomers.map(
-            (customer) => (
-              <TouchableOpacity
-                key={customer.id}
-                style={styles.customerCard}
-                activeOpacity={0.8}
-                onPress={() =>
-                  openCustomerProfile(
-                    customer
-                  )
-                }
-              >
-                <View style={styles.avatar}>
-                  <Text style={styles.avatarText}>
-                    {customer.name
-                      .charAt(0)
-                      .toUpperCase()}
-                  </Text>
-                </View>
-
-                <View style={styles.customerInfo}>
-                  <Text
-                    style={
-                      styles.customerName
-                    }
-                  >
-                    {customer.name}
-                  </Text>
-
-                  <Text
-                    style={
-                      styles.customerPhone
-                    }
-                  >
-                    📞 {customer.phone}
-                  </Text>
-
-                  <Text
-                    style={styles.customerId}
-                  >
-                    ID: {customer.id}
-                  </Text>
-                </View>
-
-                <View
+            {!search &&
+              filter === "All" && (
+                <TouchableOpacity
                   style={
-                    styles.customerRight
+                    styles.emptyButton
+                  }
+                  onPress={
+                    openAddCustomer
                   }
                 >
                   <Text
                     style={
-                      styles.orderCount
+                      styles.emptyButtonText
                     }
                   >
-                    {customer.orders}
+                    + Add Customer
                   </Text>
+                </TouchableOpacity>
+              )}
+          </View>
+        ) : (
+          filteredCustomers.map(
+            (customer) => {
+             const stats =
+  customerStats[customer.id] ?? {
+    orders: 0,
+    activeOrders: 0,
+    completedOrders: 0,
+    bills: 0,
+    paid: 0,
+    due: 0,
+    measurements: 0,
+    totalBilled: 0,
+    lastOrderDate: "",
+    nextDeliveryDate: "",
+    latestOrder: null,
+  };
 
-                  <Text
-                    style={
-                      styles.orderLabel
-                    }
-                  >
-                    orders
-                  </Text>
+              const health =
+                getCustomerHealth(
+                  stats
+                );
 
-                  <Text
+              const latestOrder =
+                stats.latestOrder;
+
+              const deliveryInfo =
+                latestOrder
+                  ? getDeliveryInfo(
+                      latestOrder
+                    )
+                  : null;
+
+              const progress =
+                latestOrder
+                  ? getProgressPercent(
+                      latestOrder.status
+                    )
+                  : 0;
+
+              return (
+                <TouchableOpacity
+                  key={customer.id}
+                  style={
+                    styles.customerCard
+                  }
+                  activeOpacity={0.92}
+                  onPress={() =>
+                    openProfile(
+                      customer
+                    )
+                  }
+                >
+                  <View
                     style={
-                      styles.arrow
+                      styles.customerTop
                     }
                   >
-                    ›
-                  </Text>
-                </View>
-              </TouchableOpacity>
-            )
+                    <View
+                      style={
+                        styles.avatar
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.avatarText
+                        }
+                      >
+                        {getInitials(
+                          customer.name
+                        )}
+                      </Text>
+                    </View>
+
+                    <View
+                      style={
+                        styles.customerMain
+                      }
+                    >
+                      <View
+                        style={
+                          styles.customerNameRow
+                        }
+                      >
+                        <Text
+                          style={
+                            styles.customerName
+                          }
+                          numberOfLines={1}
+                        >
+                          {customer.name}
+                        </Text>
+
+                        <View
+                          style={[
+                            styles.healthBadge,
+                            health.type ===
+                              "danger" &&
+                              styles.healthBadgeDanger,
+                            health.type ===
+                              "warning" &&
+                              styles.healthBadgeWarning,
+                            health.type ===
+                              "info" &&
+                              styles.healthBadgeInfo,
+                            health.type ===
+                              "success" &&
+                              styles.healthBadgeSuccess,
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.healthBadgeText,
+                              health.type ===
+                                "danger" &&
+                                styles.healthBadgeTextDanger,
+                              health.type ===
+                                "warning" &&
+                                styles.healthBadgeTextWarning,
+                              health.type ===
+                                "info" &&
+                                styles.healthBadgeTextInfo,
+                              health.type ===
+                                "success" &&
+                                styles.healthBadgeTextSuccess,
+                            ]}
+                          >
+                            {
+                              health.symbol
+                            }{" "}
+                            {
+                              health.label
+                            }
+                          </Text>
+                        </View>
+                      </View>
+
+                      <Text
+                        style={
+                          styles.customerPhone
+                        }
+                      >
+                        {customer.phone}
+                      </Text>
+
+                      {!!customer.email && (
+                        <Text
+                          style={
+                            styles.customerEmail
+                          }
+                          numberOfLines={
+                            1
+                          }
+                        >
+                          {
+                            customer.email
+                          }
+                        </Text>
+                      )}
+                    </View>
+
+                    <TouchableOpacity
+                      style={
+                        styles.editButton
+                      }
+                      onPress={() =>
+                        openEditCustomer(
+                          customer
+                        )
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.editButtonText
+                        }
+                      >
+                        Edit
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* CUSTOMER METRICS */}
+                  <View
+                    style={
+                      styles.metricsRow
+                    }
+                  >
+                    <View
+                      style={
+                        styles.metricBox
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.metricValue
+                        }
+                      >
+                        {stats.orders}
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.metricLabel
+                        }
+                      >
+                        Orders
+                      </Text>
+                    </View>
+
+                    <View
+                      style={
+                        styles.metricDivider
+                      }
+                    />
+
+                    <View
+                      style={
+                        styles.metricBox
+                      }
+                    >
+                      <Text
+                        style={[
+                          styles.metricValue,
+                          stats.activeOrders >
+                            0 &&
+                            styles.activeMetric,
+                        ]}
+                      >
+                        {
+                          stats.activeOrders
+                        }
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.metricLabel
+                        }
+                      >
+                        Active
+                      </Text>
+                    </View>
+
+                    <View
+                      style={
+                        styles.metricDivider
+                      }
+                    />
+
+                    <View
+                      style={
+                        styles.metricBox
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.metricValue
+                        }
+                      >
+                        {
+                          stats.measurements
+                        }
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.metricLabel
+                        }
+                      >
+                        Measurements
+                      </Text>
+                    </View>
+
+                    <View
+                      style={
+                        styles.metricDivider
+                      }
+                    />
+
+                    <View
+                      style={
+                        styles.metricBox
+                      }
+                    >
+                      <Text
+                        style={[
+                          styles.metricValue,
+                          stats.due > 0 &&
+                            styles.dueMetric,
+                        ]}
+                      >
+                        {formatMoney(
+                          stats?.due ?? 0
+                        )}
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.metricLabel
+                        }
+                      >
+                        Due
+                      </Text>
+                    </View>
+                  </View>
+
+                  {/* LATEST ORDER */}
+                  {latestOrder && (
+                    <View
+                      style={
+                        styles.latestOrderBox
+                      }
+                    >
+                      <View
+                        style={
+                          styles.latestOrderHeader
+                        }
+                      >
+                        <Text
+                          style={
+                            styles.latestOrderTitle
+                          }
+                        >
+                          Latest Order
+                        </Text>
+
+                        {deliveryInfo && (
+                          <Text
+                            style={[
+                              styles.deliveryLabel,
+                              deliveryInfo.tone ===
+                                "danger" &&
+                                styles.deliveryDanger,
+                              deliveryInfo.tone ===
+                                "warning" &&
+                                styles.deliveryWarning,
+                              deliveryInfo.tone ===
+                                "success" &&
+                                styles.deliverySuccess,
+                              deliveryInfo.tone ===
+                                "info" &&
+                                styles.deliveryInfo,
+                            ]}
+                          >
+                            {
+                              deliveryInfo.label
+                            }
+                          </Text>
+                        )}
+                      </View>
+
+                      <View
+                        style={
+                          styles.latestOrderRow
+                        }
+                      >
+                        <View
+                          style={
+                            styles.latestOrderInfo
+                          }
+                        >
+                          <Text
+                            style={
+                              styles.latestOrderItem
+                            }
+                            numberOfLines={
+                              1
+                            }
+                          >
+                            {
+                              latestOrder.item
+                            }
+                          </Text>
+
+                          <Text
+                            style={
+                              styles.latestOrderMeta
+                            }
+                          >
+                            {
+                              latestOrder.status
+                            }{" "}• Qty{" "}
+                            {
+                              latestOrder.quantity
+                            }{" "}• {formatMoney(
+                              getOrderTotal(
+                                latestOrder
+                              )
+                            )}
+                          </Text>
+                        </View>
+
+                        <Text
+                          style={
+                            styles.latestOrderDate
+                          }
+                        >
+                          {dateLabel(
+                            latestOrder.deliveryDate
+                          )}
+                        </Text>
+                      </View>
+
+                      <View
+                        style={
+                          styles.progressTrack
+                        }
+                      >
+                        <View
+                          style={[
+                            styles.progressFill,
+                            {
+                              width: `${progress}%`,
+                            },
+                          ]}
+                        />
+                      </View>
+
+                      <View
+                        style={
+                          styles.progressBottom
+                        }
+                      >
+                        <Text
+                          style={
+                            styles.progressStatus
+                          }
+                        >
+                          {getStatusSymbol(
+                            latestOrder.status
+                          )}{" "}
+                          {getStatusLabel(
+                            latestOrder.status
+                          )}
+                        </Text>
+
+                        <Text
+                          style={
+                            styles.progressPercent
+                          }
+                        >
+                          {progress}%
+                        </Text>
+                      </View>
+                    </View>
+                  )}
+
+                  {/* BOTTOM ACTIONS */}
+                  <View
+                    style={
+                      styles.cardActions
+                    }
+                  >
+                    <TouchableOpacity
+                      style={
+                        styles.cardAction
+                      }
+                      onPress={() =>
+                        onOpenOrders(
+                          customer
+                        )
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.cardActionIcon
+                        }
+                      >OR</Text>
+
+                      <Text
+                        style={
+                          styles.cardActionText
+                        }
+                      >
+                        Orders
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={
+                        styles.cardAction
+                      }
+                      onPress={() =>
+                        onOpenMeasurements(
+                          customer
+                        )
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.cardActionIcon
+                        }
+                      >ME</Text>
+
+                      <Text
+                        style={
+                          styles.cardActionText
+                        }
+                      >
+                        Measurements
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={
+                        styles.cardAction
+                      }
+                      onPress={() =>
+                        onOpenBilling(
+                          customer
+                        )
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.cardActionIcon
+                        }
+                      >BI</Text>
+
+                      <Text
+                        style={
+                          styles.cardActionText
+                        }
+                      >
+                        Billing
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={
+                        styles.cardAction
+                      }
+                      onPress={() =>
+                        openProfile(
+                          customer
+                        )
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.cardActionIcon
+                        }
+                      >PR</Text>
+
+                      <Text
+                        style={
+                          styles.cardActionText
+                        }
+                      >
+                        Profile
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </TouchableOpacity>
+              );
+            }
           )
         )}
       </ScrollView>
 
-      {/* =================================================
-          ADD CUSTOMER MODAL
-      ================================================= */}
-
+      {/* ADD / EDIT CUSTOMER MODAL */}
       <Modal
-        visible={showAddModal}
-        animationType="slide"
+        visible={showCustomerModal}
         transparent
+        animationType="slide"
         onRequestClose={() =>
-          setShowAddModal(false)
+          setShowCustomerModal(
+            false
+          )
         }
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.formModal}>
+        <View
+          style={styles.modalOverlay}
+        >
+          <View
+            style={styles.modalContainer}
+          >
+            <View
+              style={styles.modalHeader}
+            >
+              <View>
+                <Text
+                  style={
+                    styles.modalEyebrow
+                  }
+                >
+                  CUSTOMER
+                </Text>
+
+                <Text
+                  style={
+                    styles.modalTitle
+                  }
+                >
+                  {editingCustomer
+                    ? "Edit Customer"
+                    : "Add Customer"}
+                </Text>
+              </View>
+
+              <TouchableOpacity
+                style={
+                  styles.closeButton
+                }
+                onPress={() =>
+                  setShowCustomerModal(
+                    false
+                  )
+                }
+              >
+                <Text
+                  style={
+                    styles.closeButtonText
+                  }
+                >
+×
+                </Text>
+              </TouchableOpacity>
+            </View>
+
             <ScrollView
               showsVerticalScrollIndicator={
                 false
               }
+              keyboardShouldPersistTaps="handled"
             >
-              <View
-                style={styles.modalHeader}
+              <Text
+                style={styles.inputLabel}
               >
-                <View>
-                  <Text
-                    style={
-                      styles.modalTitle
-                    }
-                  >
-                    Add Customer
-                  </Text>
-
-                  <Text
-                    style={
-                      styles.modalSubtitle
-                    }
-                  >
-                    Create a new customer profile
-                  </Text>
-                </View>
-
-                <TouchableOpacity
-                  style={styles.closeIconButton}
-                  onPress={() =>
-                    setShowAddModal(false)
-                  }
-                >
-                  <Text
-                    style={
-                      styles.closeIconText
-                    }
-                  >
-                    ×
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              <Text style={styles.inputLabel}>
-                Customer Name *
+                Customer Name (Optional)
               </Text>
 
               <TextInput
                 value={name}
                 onChangeText={setName}
                 placeholder="Enter customer name"
-                placeholderTextColor="#999"
+                placeholderTextColor="#A18D96"
                 style={styles.input}
               />
 
-              <Text style={styles.inputLabel}>
+              <Text
+                style={styles.inputLabel}
+              >
                 Phone Number *
               </Text>
 
@@ -700,81 +1887,62 @@ export default function CustomersScreen({
                 value={phone}
                 onChangeText={setPhone}
                 placeholder="Enter phone number"
-                placeholderTextColor="#999"
+                placeholderTextColor="#A18D96"
                 keyboardType="phone-pad"
                 style={styles.input}
               />
 
-              <Text style={styles.inputLabel}>
-                Email
-              </Text>
-
-              <TextInput
-                value={email}
-                onChangeText={setEmail}
-                placeholder="Enter email"
-                placeholderTextColor="#999"
-                keyboardType="email-address"
-                autoCapitalize="none"
-                style={styles.input}
-              />
-
-              <Text style={styles.inputLabel}>
-                Address
-              </Text>
-
-              <TextInput
-                value={address}
-                onChangeText={setAddress}
-                placeholder="Enter address"
-                placeholderTextColor="#999"
-                style={[
-                  styles.input,
-                  styles.multilineInput,
-                ]}
-                multiline
-              />
-
-              <Text style={styles.inputLabel}>
+              <Text
+                style={styles.inputLabel}
+              >
                 Notes
               </Text>
 
               <TextInput
                 value={notes}
                 onChangeText={setNotes}
-                placeholder="Add customer notes"
-                placeholderTextColor="#999"
+                placeholder="Customer preferences or notes"
+                placeholderTextColor="#A18D96"
+                multiline
                 style={[
                   styles.input,
                   styles.multilineInput,
                 ]}
-                multiline
               />
 
               <TouchableOpacity
-                style={styles.primaryButton}
-                onPress={
-                  handleCreateCustomer
+                style={
+                  styles.saveButton
                 }
+                onPress={
+                  saveCustomer
+                }
+                activeOpacity={0.85}
               >
                 <Text
                   style={
-                    styles.primaryButtonText
+                    styles.saveButtonText
                   }
                 >
-                  Add Customer
+                  {editingCustomer
+                    ? "Update Customer"
+                    : "Save Customer"}
                 </Text>
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={styles.secondaryButton}
+                style={
+                  styles.cancelButton
+                }
                 onPress={() =>
-                  setShowAddModal(false)
+                  setShowCustomerModal(
+                    false
+                  )
                 }
               >
                 <Text
                   style={
-                    styles.secondaryButtonText
+                    styles.cancelButtonText
                   }
                 >
                   Cancel
@@ -785,818 +1953,1033 @@ export default function CustomersScreen({
         </View>
       </Modal>
 
-      {/* =================================================
-          CUSTOMER PROFILE MODAL
-      ================================================= */}
-
+      {/* CUSTOMER PROFILE MODAL */}
       <Modal
         visible={showProfileModal}
-        animationType="slide"
         transparent
-        onRequestClose={closeProfile}
+        animationType="slide"
+        onRequestClose={
+          closeProfile
+        }
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.profileModal}>
-            {selectedCustomer && (
-              <ScrollView
-                showsVerticalScrollIndicator={
-                  false
+        <View
+          style={styles.modalOverlay}
+        >
+          <View
+            style={
+              styles.profileModalContainer
+            }
+          >
+            <View
+              style={styles.modalHeader}
+            >
+              <View>
+                <Text
+                  style={
+                    styles.modalEyebrow
+                  }
+                >
+                  CUSTOMER PROFILE
+                </Text>
+
+                <Text
+                  style={
+                    styles.modalTitle
+                  }
+                >
+                  {selectedCustomer?.name ||
+                    "Customer"}
+                </Text>
+              </View>
+
+              <TouchableOpacity
+                style={
+                  styles.closeButton
+                }
+                onPress={
+                  closeProfile
                 }
               >
-                <View
-                  style={
-                    styles.profileHeader
-                  }
-                >
-                  <View
-                    style={
-                      styles.largeAvatar
-                    }
-                  >
-                    <Text
-                      style={
-                        styles.largeAvatarText
-                      }
-                    >
-                      {selectedCustomer.name
-                        .charAt(0)
-                        .toUpperCase()}
-                    </Text>
-                  </View>
-
-                  <View
-                    style={
-                      styles.profileHeaderInfo
-                    }
-                  >
-                    <Text
-                      style={
-                        styles.profileName
-                      }
-                    >
-                      {selectedCustomer.name}
-                    </Text>
-
-                    <Text
-                      style={
-                        styles.profilePhone
-                      }
-                    >
-                      📞{" "}
-                      {
-                        selectedCustomer.phone
-                      }
-                    </Text>
-
-                    <Text
-                      style={
-                        styles.profileCustomerId
-                      }
-                    >
-                      {selectedCustomer.id}
-                    </Text>
-                  </View>
-
-                  <TouchableOpacity
-                    style={
-                      styles.closeIconButton
-                    }
-                    onPress={
-                      closeProfile
-                    }
-                  >
-                    <Text
-                      style={
-                        styles.closeIconText
-                      }
-                    >
-                      ×
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-
                 <Text
                   style={
-                    styles.sectionTitle
+                    styles.closeButtonText
                   }
                 >
-                  Customer Information
+×
                 </Text>
+              </TouchableOpacity>
+            </View>
 
-                <View
-                  style={
-                    styles.infoCard
+            {selectedCustomer &&
+              selectedStats && (
+                <ScrollView
+                  showsVerticalScrollIndicator={
+                    false
+                  }
+                  contentContainerStyle={
+                    styles.profileContent
                   }
                 >
-                  <InfoRow
-                    label="Phone"
-                    value={
-                      selectedCustomer.phone
-                    }
-                  />
-
-                  <InfoRow
-                    label="Email"
-                    value={
-                      selectedCustomer.email ||
-                      "Not provided"
-                    }
-                  />
-
-                  <InfoRow
-                    label="Address"
-                    value={
-                      selectedCustomer.address ||
-                      "Not provided"
-                    }
-                  />
-
-                  <InfoRow
-                    label="Notes"
-                    value={
-                      selectedCustomer.notes ||
-                      "No notes"
-                    }
-                    last
-                  />
-                </View>
-
-                <Text
-                  style={
-                    styles.sectionTitle
-                  }
-                >
-                  Customer Summary
-                </Text>
-
-                <View
-                  style={
-                    styles.summaryGrid
-                  }
-                >
-                  <SummaryCard
-                    icon="🧵"
-                    value={
-                      customerOrders.length
-                    }
-                    label="Orders"
-                  />
-
-                  <SummaryCard
-                    icon="🧾"
-                    value={
-                      customerBills.length
-                    }
-                    label="Bills"
-                  />
-
-                  <SummaryCard
-                    icon="📏"
-                    value={
-                      customerMeasurements.length
-                    }
-                    label="Measurements"
-                  />
-                </View>
-
-                <View
-                  style={
-                    styles.balanceCard
-                  }
-                >
-                  <View>
-                    <Text
-                      style={
-                        styles.balanceLabel
-                      }
-                    >
-                      Outstanding Balance
-                    </Text>
-
-                    <Text
-                      style={
-                        styles.balanceAmount
-                      }
-                    >
-                      {formatCurrency(
-                        totalPending
-                      )}
-                    </Text>
-                  </View>
-
-                  <Text
-                    style={
-                      styles.balanceIcon
-                    }
-                  >
-                    💰
-                  </Text>
-                </View>
-
-                <View
-                  style={
-                    styles.sectionHeader
-                  }
-                >
-                  <Text
-                    style={
-                      styles.sectionTitle
-                    }
-                  >
-                    Latest Measurement
-                  </Text>
-
-                  <TouchableOpacity
-                    onPress={
-                      handleOpenMeasurements
-                    }
-                  >
-                    <Text
-                      style={
-                        styles.linkText
-                      }
-                    >
-                      View All
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-
-                {latestMeasurement ? (
+                  {/* PROFILE HEADER */}
                   <View
                     style={
-                      styles.measurementCard
+                      styles.profileHero
                     }
                   >
                     <View
                       style={
-                        styles.measurementHeader
+                        styles.profileAvatar
                       }
                     >
-                      <View>
-                        <Text
-                          style={
-                            styles.measurementType
-                          }
-                        >
-                          {
-                            latestMeasurement.type
-                          }
-                        </Text>
+                      <Text
+                        style={
+                          styles.profileAvatarText
+                        }
+                      >
+                        {getInitials(
+                          selectedCustomer.name
+                        )}
+                      </Text>
+                    </View>
 
+                    <View
+                      style={
+                        styles.profileHeroText
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.profileName
+                        }
+                      >
+                        {
+                          selectedCustomer.name
+                        }
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.profilePhone
+                        }
+                      >
+                        {
+                          selectedCustomer.phone
+                        }
+                      </Text>
+
+                      
+                    </View>
+                  </View>
+
+                  {/* QUICK PROFILE STATUS */}
+                  <View
+                    style={
+                      styles.profileStatusCard
+                    }
+                  >
+                    <View>
+                      <Text
+                        style={
+                          styles.profileStatusLabel
+                        }
+                      >
+                        Customer Status
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.profileStatusValue
+                        }
+                      >
+                        {
+                          getCustomerHealth(
+                            selectedStats
+                          ).label
+                        }
+                      </Text>
+                    </View>
+
+                    <View
+                      style={
+                        styles.profileStatusRight
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.profileStatusLabel
+                        }
+                      >
+                        Last Order
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.profileStatusValue
+                        }
+                      >
+                        {dateLabel(
+                          selectedStats.lastOrderDate
+                        )}
+                      </Text>
+                    </View>
+                  </View>
+
+                  {/* SUMMARY GRID */}
+                  <Text
+                    style={
+                      styles.profileSectionTitle
+                    }
+                  >
+                    Customer Summary
+                  </Text>
+
+                  <View
+                    style={
+                      styles.profileGrid
+                    }
+                  >
+                    <View
+                      style={
+                        styles.profileStatCard
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.profileStatValue
+                        }
+                      >
+                        {
+                          selectedStats.orders
+                        }
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.profileStatLabel
+                        }
+                      >
+                        Total Orders
+                      </Text>
+                    </View>
+
+                    <View
+                      style={
+                        styles.profileStatCard
+                      }
+                    >
+                      <Text
+                        style={[
+                          styles.profileStatValue,
+                          selectedStats.activeOrders >
+                            0 &&
+                            styles.activeMetric,
+                        ]}
+                      >
+                        {
+                          selectedStats.activeOrders
+                        }
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.profileStatLabel
+                        }
+                      >
+                        Active
+                      </Text>
+                    </View>
+
+                    <View
+                      style={
+                        styles.profileStatCard
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.profileStatValue
+                        }
+                      >
+                        {
+                          selectedStats.completedOrders
+                        }
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.profileStatLabel
+                        }
+                      >
+                        Completed
+                      </Text>
+                    </View>
+
+                    <View
+                      style={
+                        styles.profileStatCard
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.profileStatValue
+                        }
+                      >
+                        {
+                          selectedStats.measurements
+                        }
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.profileStatLabel
+                        }
+                      >
+                        Measurements
+                      </Text>
+                    </View>
+
+                    <View
+                      style={
+                        styles.profileStatCard
+                      }
+                    >
+                      <Text
+                        style={[
+                          styles.profileStatValue,
+                          styles.paidText,
+                        ]}
+                      >
+                        {formatMoney(
+                          selectedStats.paid
+                        )}
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.profileStatLabel
+                        }
+                      >
+                        Paid
+                      </Text>
+                    </View>
+
+                    <View
+                      style={
+                        styles.profileStatCard
+                      }
+                    >
+                      <Text
+                        style={[
+                          styles.profileStatValue,
+                          selectedStats.due >
+                            0 &&
+                            styles.dueMetric,
+                        ]}
+                      >
+                        {formatMoney(
+                          selectedStats?.due ?? 0
+                        )}
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.profileStatLabel
+                        }
+                      >
+                        Outstanding
+                      </Text>
+                    </View>
+                  </View>
+
+                  {/* PERSONAL DETAILS */}
+                  <Text
+                    style={
+                      styles.profileSectionTitle
+                    }
+                  >
+                    Personal Details
+                  </Text>
+
+                  <View
+                    style={
+                      styles.detailsCard
+                    }
+                  >
+                    <View
+                      style={
+                        styles.detailRow
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.detailLabel
+                        }
+                      >
+                        Phone
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.detailValue
+                        }
+                      >
+                        {
+                          selectedCustomer.phone ||
+                          "-"
+                        }
+                      </Text>
+                    </View>
+
+                    
+
+                    
+
+                    <View
+                      style={
+                        styles.detailRow
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.detailLabel
+                        }
+                      >
+                        Notes
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.detailValue
+                        }
+                        numberOfLines={
+                          4
+                        }
+                      >
+                        {
+                          selectedCustomer.notes ||
+                          "-"
+                        }
+                      </Text>
+                    </View>
+                  </View>
+
+                  {/* CUSTOMER INSIGHTS */}
+                  <Text
+                    style={
+                      styles.profileSectionTitle
+                    }
+                  >
+                    Customer Insights
+                  </Text>
+
+                  <View
+                    style={
+                      styles.insightCard
+                    }
+                  >
+                    <View
+                      style={
+                        styles.insightRow
+                      }
+                    >
+                      <View
+                        style={
+                          styles.insightIconBox
+                        }
+                      >
                         <Text
                           style={
-                            styles.measurementDate
+                            styles.insightIcon
                           }
                         >
-                          {
-                            latestMeasurement.date
-                          }
+                          ✦Â 
                         </Text>
                       </View>
 
-                      <Text
+                      <View
                         style={
-                          styles.measurementIcon
+                          styles.insightText
                         }
                       >
-                        📏
-                      </Text>
+                        <Text
+                          style={
+                            styles.insightTitle
+                          }
+                        >
+                          Latest Order
+                        </Text>
+
+                        <Text
+                          style={
+                            styles.insightValue
+                          }
+                          numberOfLines={
+                            1
+                          }
+                        >
+                          {selectedStats.latestOrder
+                            ? `${selectedStats.latestOrder.item} •${selectedStats.latestOrder.status}`
+                            : "No orders yet"}
+                        </Text>
+                      </View>
                     </View>
 
                     <View
                       style={
-                        styles.measurementGrid
+                        styles.insightRow
                       }
                     >
-                      <MeasurementValue
-                        label="Bust"
-                        value={
-                          latestMeasurement.bust
-                        }
-                      />
-
-                      <MeasurementValue
-                        label="Waist"
-                        value={
-                          latestMeasurement.waist
-                        }
-                      />
-
-                      <MeasurementValue
-                        label="Hip"
-                        value={
-                          latestMeasurement.hip
-                        }
-                      />
-
-                      <MeasurementValue
-                        label="Shoulder"
-                        value={
-                          latestMeasurement.shoulder
-                        }
-                      />
-                    </View>
-
-                    <TouchableOpacity
-                      style={
-                        styles.measurementButton
-                      }
-                      onPress={
-                        handleOpenMeasurements
-                      }
-                    >
-                      <Text
+                      <View
                         style={
-                          styles.measurementButtonText
+                          styles.insightIconBox
                         }
                       >
-                        View All Measurements
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                ) : (
-                  <View
-                    style={
-                      styles.emptySmallCard
-                    }
-                  >
-                    <Text
-                      style={
-                        styles.emptySmallIcon
-                      }
-                    >
-                      📏
-                    </Text>
-
-                    <Text
-                      style={
-                        styles.emptySmallTitle
-                      }
-                    >
-                      No measurements yet
-                    </Text>
-
-                    <TouchableOpacity
-                      onPress={
-                        handleOpenMeasurements
-                      }
-                    >
-                      <Text
-                        style={
-                          styles.linkText
-                        }
-                      >
-                        Add Measurement
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
-
-                <TouchableOpacity
-                  style={
-                    styles.historyButton
-                  }
-                  onPress={
-                    openCustomerHistory
-                  }
-                >
-                  <View
-                    style={
-                      styles.historyButtonIcon
-                    }
-                  >
-                    <Text
-                      style={
-                        styles.historyIconText
-                      }
-                    >
-                      📜
-                    </Text>
-                  </View>
-
-                  <View
-                    style={
-                      styles.historyButtonInfo
-                    }
-                  >
-                    <Text
-                      style={
-                        styles.historyButtonTitle
-                      }
-                    >
-                      Customer History
-                    </Text>
-
-                    <Text
-                      style={
-                        styles.historyButtonSubtitle
-                      }
-                    >
-                      Orders, bills, payments &
-                      measurements
-                    </Text>
-                  </View>
-
-                  <Text
-                    style={
-                      styles.historyArrow
-                    }
-                  >
-                    ›
-                  </Text>
-                </TouchableOpacity>
-
-                <View
-                  style={
-                    styles.actionContainer
-                  }
-                >
-                  <TouchableOpacity
-                    style={
-                      styles.editButton
-                    }
-                    onPress={
-                      openEditCustomer
-                    }
-                  >
-                    <Text
-                      style={
-                        styles.editButtonText
-                      }
-                    >
-                      ✏️ Edit Customer
-                    </Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={
-                      styles.closeButton
-                    }
-                    onPress={
-                      closeProfile
-                    }
-                  >
-                    <Text
-                      style={
-                        styles.closeButtonText
-                      }
-                    >
-                      Close
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              </ScrollView>
-            )}
-          </View>
-        </View>
-      </Modal>
-
-      {/* =================================================
-          CUSTOMER HISTORY MODAL
-      ================================================= */}
-
-      <Modal
-        visible={showHistoryModal}
-        animationType="slide"
-        transparent
-        onRequestClose={closeHistory}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.historyModal}>
-            {selectedCustomer && (
-              <ScrollView
-                showsVerticalScrollIndicator={
-                  false
-                }
-              >
-                <View
-                  style={
-                    styles.historyHeader
-                  }
-                >
-                  <View>
-                    <Text
-                      style={
-                        styles.modalTitle
-                      }
-                    >
-                      Customer History
-                    </Text>
-
-                    <Text
-                      style={
-                        styles.modalSubtitle
-                      }
-                    >
-                      {
-                        selectedCustomer.name
-                      }
-                    </Text>
-                  </View>
-
-                  <TouchableOpacity
-                    style={
-                      styles.closeIconButton
-                    }
-                    onPress={
-                      closeHistory
-                    }
-                  >
-                    <Text
-                      style={
-                        styles.closeIconText
-                      }
-                    >
-                      ×
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-
-                <View
-                  style={
-                    styles.historySummary
-                  }
-                >
-                  <HistorySummary
-                    value={
-                      customerOrders.length
-                    }
-                    label="Orders"
-                  />
-
-                  <HistorySummary
-                    value={
-                      customerBills.length
-                    }
-                    label="Bills"
-                  />
-
-                  <HistorySummary
-                    value={formatCurrency(
-                      totalPaid
-                    )}
-                    label="Paid"
-                  />
-
-                  <HistorySummary
-                    value={formatCurrency(
-                      totalPending
-                    )}
-                    label="Pending"
-                  />
-                </View>
-
-                <Text
-                  style={
-                    styles.historySectionTitle
-                  }
-                >
-                  🧵 Order History
-                </Text>
-
-                {customerOrders.length ===
-                0 ? (
-                  <EmptyHistory
-                    text="No orders found for this customer."
-                  />
-                ) : (
-                  customerOrders.map(
-                    (order) => (
-                      <TouchableOpacity
-                        key={order.id}
-                        activeOpacity={0.85}
-                        onPress={() =>
-                          openOrderDetails(
-                            order
-                          )
-                        }
-                        style={
-                          styles.historyCard
-                        }
-                      >
-                        <View
+                        <Text
                           style={
-                            styles.historyCardTop
+                            styles.insightIcon
                           }
                         >
-                          <View
-                            style={
-                              styles.historyCardInfo
-                            }
-                          >
-                            <Text
-                              style={
-                                styles.historyCardTitle
-                              }
-                            >
-                              {order.orderNumber ||
-                                order.id}
-                            </Text>
+                          ✦
+                        </Text>
+                      </View>
 
-                            <Text
-                              style={
-                                styles.historyCardSubtitle
-                              }
-                            >
-                              {order.item}
-                            </Text>
-                          </View>
-
-                          <View
-                            style={
-                              styles.historyStatus
-                            }
-                          >
-                            <Text
-                              style={
-                                styles.historyStatusText
-                              }
-                            >
-                              {order.status}
-                            </Text>
-                          </View>
-                        </View>
-
-                        <View
+                      <View
+                        style={
+                          styles.insightText
+                        }
+                      >
+                        <Text
                           style={
-                            styles.historyCardBottom
+                            styles.insightTitle
                           }
                         >
-                          <Text
-                            style={
-                              styles.historyMeta
-                            }
-                          >
-                            Qty:{" "}
-                            {order.quantity ||
-                              1}
-                          </Text>
-
-                          <Text
-                            style={
-                              styles.historyAmount
-                            }
-                          >
-                            {formatCurrency(
-                              Number(
-                                order.price ||
-                                  0
-                              ) *
-                                Number(
-                                  order.quantity ||
-                                    1
-                                )
-                            )}
-                          </Text>
-
-                          <Text
-                            style={
-                              styles.historyCardArrow
-                            }
-                          >
-                            ›
-                          </Text>
-                        </View>
+                          Next Delivery
+                        </Text>
 
                         <Text
                           style={
-                            styles.tapForDetails
+                            styles.insightValue
                           }
                         >
-                          Tap to view order details
+                          {selectedStats.nextDeliveryDate
+                            ? dateLabel(
+                                selectedStats.nextDeliveryDate
+                              )
+                            : "No active delivery"}
                         </Text>
-                      </TouchableOpacity>
-                    )
-                  )
-                )}
+                      </View>
+                    </View>
 
-                <Text
-                  style={
-                    styles.historySectionTitle
-                  }
-                >
-                  🧾 Billing History
-                </Text>
-
-                {customerBills.length ===
-                0 ? (
-                  <EmptyHistory
-                    text="No bills found for this customer."
-                  />
-                ) : (
-                  customerBills.map(
-                    (bill) => (
+                    <View
+                      style={
+                        styles.insightRow
+                      }
+                    >
                       <View
-                        key={bill.id}
                         style={
-                          styles.historyCard
+                          styles.insightIconBox
                         }
                       >
-                        <View
+                        <Text
                           style={
-                            styles.historyCardTop
+                            styles.insightIcon
+                          }
+                        >
+                          ✦
+                        </Text>
+                      </View>
+
+                      <View
+                        style={
+                          styles.insightText
+                        }
+                      >
+                        <Text
+                          style={
+                            styles.insightTitle
+                          }
+                        >
+                          Payment Status
+                        </Text>
+
+                        <Text
+                          style={[
+                            styles.insightValue,
+                            selectedStats.due >
+                              0 &&
+                              styles.dueText,
+                          ]}
+                        >
+                          {selectedStats.due >
+                          0
+                            ? `${formatMoney(
+                                selectedStats.due
+                              )} outstanding`
+                            : "Payments up to date"}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
+
+                  {/* QUICK ACTIONS */}
+                  <Text
+                    style={
+                      styles.profileSectionTitle
+                    }
+                  >
+                    Quick Actions
+                  </Text>
+
+                  <View
+                    style={
+                      styles.quickActionGrid
+                    }
+                  >
+                    <TouchableOpacity
+                      style={
+                        styles.quickAction
+                      }
+                      onPress={() => {
+                        closeProfile();
+
+                        onOpenOrders(
+                          selectedCustomer
+                        );
+                      }}
+                    >
+                      <Text
+                        style={
+                          styles.quickActionIcon
+                        }
+                      >
+                        ✦
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.quickActionText
+                        }
+                      >
+                        New Order
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={
+                        styles.quickAction
+                      }
+                      onPress={() => {
+                        closeProfile();
+
+                        onOpenMeasurements(
+                          selectedCustomer
+                        );
+                      }}
+                    >
+                      <Text
+                        style={
+                          styles.quickActionIcon
+                        }
+                      >
+                        ✦
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.quickActionText
+                        }
+                      >
+                        Measurements
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={
+                        styles.quickAction
+                      }
+                      onPress={() => {
+                        closeProfile();
+
+                        onOpenBilling(
+                          selectedCustomer
+                        );
+                      }}
+                    >
+                      <Text
+                        style={
+                          styles.quickActionIcon
+                        }
+                      >
+                        ✦
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.quickActionText
+                        }
+                      >
+                        Create Bill
+                      </Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={
+                        styles.quickAction
+                      }
+                      onPress={() => {
+                        closeProfile();
+
+                        onAddPayment(
+                          selectedCustomer
+                        );
+                      }}
+                    >
+                      <Text
+                        style={
+                          styles.quickActionIcon
+                        }
+                      >
+                        ✦
+                      </Text>
+
+                      <Text
+                        style={
+                          styles.quickActionText
+                        }
+                      >
+                        Add Payment
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+
+                  {/* ORDER HISTORY */}
+                  <Text
+                    style={
+                      styles.profileSectionTitle
+                    }
+                  >
+                    Order History
+                  </Text>
+
+                  {selectedOrders.length ===
+                  0 ? (
+                    <View
+                      style={
+                        styles.historyEmpty
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.historyEmptyText
+                        }
+                      >
+                        No orders found.
+                      </Text>
+                    </View>
+                  ) : (
+                    selectedOrders
+                      .slice(0, 8)
+                      .map((order) => {
+                        const delivery =
+                          getDeliveryInfo(
+                            order
+                          );
+
+                        const progress =
+                          getProgressPercent(
+                            order.status
+                          );
+
+                        return (
+                          <View
+                            key={
+                              order.id
+                            }
+                            style={
+                              styles.historyCard
+                            }
+                          >
+                            <View
+                              style={
+                                styles.historyTop
+                              }
+                            >
+                              <View
+                                style={
+                                  styles.historyMain
+                                }
+                              >
+                                <Text
+                                  style={
+                                    styles.historyTitle
+                                  }
+                                  numberOfLines={
+                                    1
+                                  }
+                                >
+                                  {
+                                    order.item
+                                  }
+                                </Text>
+
+                                <Text
+                                  style={
+                                    styles.historyMeta
+                                  }
+                                >
+                                  {
+                                    order.id
+                                  }{" "}
+                                  · Qty{" "}
+                                  {
+                                    order.quantity
+                                  }
+                                </Text>
+                              </View>
+
+                              <Text
+                                style={
+                                  styles.historyAmount
+                                }
+                              >
+                                {formatMoney(
+                                  getOrderTotal(
+                                    order
+                                  )
+                                )}
+                              </Text>
+                            </View>
+
+                            <View
+                              style={
+                                styles.historyStatusRow
+                              }
+                            >
+                              <Text
+                                style={
+                                  styles.historyStatus
+                                }
+                              >
+                                {getStatusSymbol(
+                                  order.status
+                                )}{" "}
+                                {
+                                  order.status
+                                }
+                              </Text>
+
+                              <Text
+                                style={[
+                                  styles.historyDelivery,
+                                  delivery.tone ===
+                                    "danger" &&
+                                    styles.deliveryDanger,
+                                  delivery.tone ===
+                                    "warning" &&
+                                    styles.deliveryWarning,
+                                  delivery.tone ===
+                                    "success" &&
+                                    styles.deliverySuccess,
+                                ]}
+                              >
+                                {
+                                  delivery.label
+                                }
+                              </Text>
+                            </View>
+
+                            <View
+                              style={
+                                styles.historyProgressTrack
+                              }
+                            >
+                              <View
+                                style={[
+                                  styles.historyProgressFill,
+                                  {
+                                    width: `${progress}%`,
+                                  },
+                                ]}
+                              />
+                            </View>
+
+                            <View
+                              style={
+                                styles.historyDateRow
+                              }
+                            >
+                              <Text
+                                style={
+                                  styles.historyDate
+                                }
+                              >
+                                Ordered{" "}
+                                {dateLabel(
+                                  order.orderDate
+                                )}
+                              </Text>
+
+                              <Text
+                                style={
+                                  styles.historyDate
+                                }
+                              >
+                                Delivery{" "}
+                                {dateLabel(
+                                  order.deliveryDate
+                                )}
+                              </Text>
+                            </View>
+                          </View>
+                        );
+                      })
+                  )}
+
+                  {/* BILLING HISTORY */}
+                  <Text
+                    style={
+                      styles.profileSectionTitle
+                    }
+                  >
+                    Bills & Payments
+                  </Text>
+
+                  {selectedBills.length ===
+                  0 ? (
+                    <View
+                      style={
+                        styles.historyEmpty
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.historyEmptyText
+                        }
+                      >
+                        No bills found.
+                      </Text>
+                    </View>
+                  ) : (
+                    selectedBills
+                      .slice(0, 8)
+                      .map((bill) => (
+                        <View
+                          key={
+                            bill.id
+                          }
+                          style={
+                            styles.billHistoryCard
                           }
                         >
                           <View
                             style={
-                              styles.historyCardInfo
+                              styles.billHistoryTop
                             }
                           >
-                            <Text
-                              style={
-                                styles.historyCardTitle
-                              }
-                            >
-                              {bill.id}
-                            </Text>
+                            <View>
+                              <Text
+                                style={
+                                  styles.billHistoryNumber
+                                }
+                              >
+                                {bill.billNumber ||
+                                  bill.id ||
+                                  "Bill"}
+                              </Text>
 
-                            <Text
+                              <Text
+                                style={
+                                  styles.billHistoryDate
+                                }
+                              >
+                                {dateLabel(
+                                  bill.billDate
+                                )}
+                              </Text>
+                            </View>
+
+                            <View
                               style={
-                                styles.historyCardSubtitle
+                                styles.billHistoryAmountBox
                               }
                             >
-                              {bill.item}
-                            </Text>
+                              <Text
+                                style={
+                                  styles.billHistoryAmount
+                                }
+                              >
+                                {formatMoney(
+                                  Number(
+                                    bill.total ||
+                                      0
+                                  )
+                                )}
+                              </Text>
+
+                              <Text
+                                style={[
+                                  styles.billStatus,
+                                  Number(
+                                    bill.balance ||
+                                      0
+                                  ) > 0 &&
+                                    styles.billStatusDue,
+                                ]}
+                              >
+                                {Number(
+                                  bill.balance ||
+                                    0
+                                ) > 0
+                                  ? "Due"
+                                  : "Paid"}
+                              </Text>
+                            </View>
                           </View>
 
                           <View
                             style={
-                              styles.billStatusBadge
+                              styles.billHistoryRow
                             }
                           >
                             <Text
                               style={
-                                styles.billStatusText
+                                styles.billHistoryLabel
                               }
                             >
-                              {bill.status}
-                            </Text>
-                          </View>
-                        </View>
-
-                        <View
-                          style={
-                            styles.billDetailsRow
-                          }
-                        >
-                          <View>
-                            <Text
-                              style={
-                                styles.historyMeta
-                              }
-                            >
-                              Bill Date
+                              Paid
                             </Text>
 
                             <Text
                               style={
-                                styles.historyDetailValue
+                                styles.billHistoryPaid
                               }
                             >
-                              {
-                                bill.billDate
-                              }
-                            </Text>
-                          </View>
-
-                          <View>
-                            <Text
-                              style={
-                                styles.historyMeta
-                              }
-                            >
-                              Total
-                            </Text>
-
-                            <Text
-                              style={
-                                styles.historyDetailValue
-                              }
-                            >
-                              {formatCurrency(
+                              {formatMoney(
                                 Number(
-                                  bill.total ||
+                                  bill.paidAmount ||
                                     0
                                 )
                               )}
                             </Text>
-                          </View>
 
-                          <View>
                             <Text
                               style={
-                                styles.historyMeta
+                                styles.billHistoryLabel
                               }
                             >
                               Balance
                             </Text>
 
                             <Text
-                              style={
-                                styles.historyBalanceValue
-                              }
+                              style={[
+                                styles.billHistoryBalance,
+                                Number(
+                                  bill.balance ||
+                                    0
+                                ) > 0 &&
+                                  styles.dueText,
+                              ]}
                             >
-                              {formatCurrency(
+                              {formatMoney(
                                 Number(
                                   bill.balance ||
                                     0
@@ -1605,2635 +2988,1407 @@ export default function CustomersScreen({
                             </Text>
                           </View>
                         </View>
-                      </View>
-                    )
-                  )
-                )}
+                      ))
+                  )}
 
-                <Text
-                  style={
-                    styles.historySectionTitle
-                  }
-                >
-                  💳 Payment History
-                </Text>
-
-                {customerPayments.length ===
-                0 ? (
-                  <EmptyHistory
-                    text="No payments found for this customer."
-                  />
-                ) : (
-                  customerPayments.map(
-                    (payment) => (
-                      <View
-                        key={payment.id}
+                  {/* PAYMENT HISTORY */}
+                  {selectedPayments.length >
+                    0 && (
+                    <>
+                      <Text
                         style={
-                          styles.paymentCard
+                          styles.profileSectionTitle
                         }
                       >
-                        <View
-                          style={
-                            styles.paymentIcon
-                          }
-                        >
-                          <Text
-                            style={
-                              styles.paymentIconText
-                            }
-                          >
-                            ✓
-                          </Text>
-                        </View>
+                        Recent Payments
+                      </Text>
 
-                        <View
-                          style={
-                            styles.paymentInfo
-                          }
-                        >
-                          <Text
-                            style={
-                              styles.paymentTitle
-                            }
-                          >
-                            {payment.id}
-                          </Text>
-
-                          <Text
-                            style={
-                              styles.paymentSubtitle
-                            }
-                          >
-                            {payment.method} •{" "}
-                            {
-                              payment.paymentDate
-                            }
-                          </Text>
-                        </View>
-
-                        <Text
-                          style={
-                            styles.paymentAmount
-                          }
-                        >
-                          +
-                          {formatCurrency(
-                            Number(
-                              payment.amount ||
-                                0
-                            )
-                          )}
-                        </Text>
-                      </View>
-                    )
-                  )
-                )}
-
-                <Text
-                  style={
-                    styles.historySectionTitle
-                  }
-                >
-                  📏 Measurement History
-                </Text>
-
-                {customerMeasurements.length ===
-                0 ? (
-                  <EmptyHistory
-                    text="No measurements found for this customer."
-                  />
-                ) : (
-                  customerMeasurements
-                    .slice()
-                    .reverse()
-                    .map(
-                      (
-                        measurement,
-                        index
-                      ) => (
-                        <View
-                          key={
-                            measurement.id ||
-                            `${measurement.type}-${index}`
-                          }
-                          style={
-                            styles.measurementHistoryCard
-                          }
-                        >
-                          <View>
-                            <Text
-                              style={
-                                styles.measurementHistoryTitle
-                              }
-                            >
-                              {
-                                measurement.type
-                              }
-                            </Text>
-
-                            <Text
-                              style={
-                                styles.measurementHistoryDate
-                              }
-                            >
-                              {
-                                measurement.date
-                              }
-                            </Text>
-                          </View>
-
-                          <View
-                            style={
-                              styles.measurementHistoryValues
-                            }
-                          >
-                            <Text
-                              style={
-                                styles.measurementHistoryValue
-                              }
-                            >
-                              Bust{" "}
-                              {measurement.bust ||
-                                "-"}
-                            </Text>
-
-                            <Text
-                              style={
-                                styles.measurementHistoryValue
-                              }
-                            >
-                              Waist{" "}
-                              {measurement.waist ||
-                                "-"}
-                            </Text>
-
-                            <Text
-                              style={
-                                styles.measurementHistoryValue
-                              }
-                            >
-                              Hip{" "}
-                              {measurement.hip ||
-                                "-"}
-                            </Text>
-
-                            <Text
-                              style={
-                                styles.measurementHistoryValue
-                              }
-                            >
-                              Shoulder{" "}
-                              {measurement.shoulder ||
-                                "-"}
-                            </Text>
-                          </View>
-                        </View>
-                      )
-                    )
-                )}
-
-                <TouchableOpacity
-                  style={
-                    styles.historyMeasurementsButton
-                  }
-                  onPress={
-                    handleOpenMeasurements
-                  }
-                >
-                  <Text
-                    style={
-                      styles.historyMeasurementsButtonText
-                    }
-                  >
-                    📏 View Full Measurements
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={
-                    styles.historyCloseButton
-                  }
-                  onPress={
-                    closeHistory
-                  }
-                >
-                  <Text
-                    style={
-                      styles.historyCloseButtonText
-                    }
-                  >
-                    Close History
-                  </Text>
-                </TouchableOpacity>
-              </ScrollView>
-            )}
-          </View>
-        </View>
-      </Modal>
-
-      {/* =================================================
-          ORDER DETAILS MODAL
-      ================================================= */}
-
-      <Modal
-        visible={showOrderDetailsModal}
-        animationType="slide"
-        transparent
-        onRequestClose={closeOrderDetails}
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.orderDetailsModal}>
-            {selectedOrder && (
-              <ScrollView
-                showsVerticalScrollIndicator={
-                  false
-                }
-              >
-                <View
-                  style={
-                    styles.orderDetailsHeader
-                  }
-                >
-                  <View
-                    style={
-                      styles.orderDetailsHeaderInfo
-                    }
-                  >
-                    <Text
-                      style={
-                        styles.orderDetailsTitle
-                      }
-                    >
-                      Order Details
-                    </Text>
-
-                    <Text
-                      style={
-                        styles.orderNumberText
-                      }
-                    >
-                      {selectedOrder.orderNumber ||
-                        selectedOrder.id}
-                    </Text>
-                  </View>
-
-                  <TouchableOpacity
-                    style={
-                      styles.closeIconButton
-                    }
-                    onPress={
-                      closeOrderDetails
-                    }
-                  >
-                    <Text
-                      style={
-                        styles.closeIconText
-                      }
-                    >
-                      ×
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-
-                <Text
-                  style={
-                    styles.detailSectionTitle
-                  }
-                >
-                  Order Information
-                </Text>
-
-                <View
-                  style={
-                    styles.detailCard
-                  }
-                >
-                  <InfoRow
-                    label="Customer"
-                    value={
-                      selectedOrder.customerName
-                    }
-                  />
-
-                  <InfoRow
-                    label="Item"
-                    value={
-                      selectedOrder.item
-                    }
-                  />
-
-                  <InfoRow
-                    label="Quantity"
-                    value={String(
-                      selectedOrder.quantity ||
-                        1
-                    )}
-                  />
-
-                  <InfoRow
-                    label="Price"
-                    value={formatCurrency(
-                      Number(
-                        selectedOrder.price ||
-                          0
-                      )
-                    )}
-                  />
-
-                  <InfoRow
-                    label="Order Date"
-                    value={
-                      selectedOrder.orderDate ||
-                      "Not available"
-                    }
-                  />
-
-                  <InfoRow
-                    label="Delivery Date"
-                    value={
-                      selectedOrder.deliveryDate ||
-                      "Not specified"
-                    }
-                  />
-
-                  <InfoRow
-                    label="Notes"
-                    value={
-                      selectedOrder.notes ||
-                      "No notes"
-                    }
-                    last
-                  />
-                </View>
-
-                <Text
-                  style={
-                    styles.detailSectionTitle
-                  }
-                >
-                  Order Status
-                </Text>
-
-                <View
-                  style={
-                    styles.statusTimelineCard
-                  }
-                >
-                  {statusSteps.map(
-                    (status, index) => {
-                      const currentIndex =
-                        getStatusIndex(
-                          selectedOrder.status
-                        );
-
-                      const completed =
-                        index <= currentIndex;
-
-                      const isCurrent =
-                        status ===
-                        selectedOrder.status;
-
-                      return (
-                        <View
-                          key={status}
-                          style={
-                            styles.timelineRow
-                          }
-                        >
-                          <View
-                            style={
-                              styles.timelineIndicatorColumn
-                            }
-                          >
+                      {selectedPayments
+                        .slice(0, 6)
+                        .map(
+                          (
+                            payment
+                          ) => (
                             <View
-                              style={[
-                                styles.timelineCircle,
-                                completed &&
-                                  styles.timelineCircleCompleted,
-                                isCurrent &&
-                                  styles.timelineCircleCurrent,
-                              ]}
+                              key={
+                                payment.id
+                              }
+                              style={
+                                styles.paymentHistoryCard
+                              }
                             >
+                              <View>
+                                <Text
+                                  style={
+                                    styles.paymentMethod
+                                  }
+                                >
+                                  {payment.method ||
+                                    "Payment"}
+                                </Text>
+
+                                <Text
+                                  style={
+                                    styles.paymentDate
+                                  }
+                                >
+                                  {dateLabel(
+                                    payment.paymentDate
+                                  )}
+                                </Text>
+                              </View>
+
                               <Text
                                 style={
-                                  styles.timelineCircleText
+                                  styles.paymentAmount
                                 }
                               >
-                                {completed
-                                  ? "✓"
-                                  : ""}
+                                +
+                                {formatMoney(
+                                  Number(
+                                    payment.amount ||
+                                      0
+                                  )
+                                )}
+                              </Text>
+                            </View>
+                          )
+                        )}
+                    </>
+                  )}
+
+                  {/* MEASUREMENTS */}
+                  <Text
+                    style={
+                      styles.profileSectionTitle
+                    }
+                  >
+                    Measurement History
+                  </Text>
+
+                  {selectedMeasurements.length ===
+                  0 ? (
+                    <View
+                      style={
+                        styles.historyEmpty
+                      }
+                    >
+                      <Text
+                        style={
+                          styles.historyEmptyText
+                        }
+                      >
+                        No measurements recorded.
+                      </Text>
+                    </View>
+                  ) : (
+                    selectedMeasurements
+                      .slice(0, 6)
+                      .map(
+                        (
+                          measurement,
+                          index
+                        ) => (
+                          <View
+                            key={String(
+                              measurement.id ??
+                                index
+                            )}
+                            style={
+                              styles.measurementHistoryCard
+                            }
+                          >
+                            <View>
+                              <Text
+                                style={
+                                  styles.measurementTitle
+                                }
+                              >
+                                Measurement Profile{" "}
+                                {selectedMeasurements.length -
+                                  index}
+                              </Text>
+
+                              {/*
+                                Measurement type does not expose
+                                createdAt, so we intentionally
+                                don't display a fake date here.
+                              */}
+                              <Text
+                                style={
+                                  styles.measurementDate
+                                }
+                              >
+                                Saved measurement profile
                               </Text>
                             </View>
 
-                            {index <
-                              statusSteps.length -
-                                1 && (
-                              <View
-                                style={[
-                                  styles.timelineLine,
-                                  index <
-                                    currentIndex &&
-                                    styles.timelineLineCompleted,
-                                ]}
-                              />
-                            )}
-                          </View>
-
-                          <View
-                            style={
-                              styles.timelineContent
-                            }
-                          >
-                            <Text
-                              style={[
-                                styles.timelineStatus,
-                                completed &&
-                                  styles.timelineStatusCompleted,
-                              ]}
-                            >
-                              {status}
-                            </Text>
-
                             <Text
                               style={
-                                styles.timelineDescription
+                                styles.measurementArrow
                               }
                             >
-                              {getStatusDescription(
-                                status
-                              )}
+                              â€º
                             </Text>
                           </View>
-                        </View>
-                      );
-                    }
+                        )
+                      )
                   )}
-                </View>
 
-                <Text
-                  style={
-                    styles.detailSectionTitle
-                  }
-                >
-                  Measurement Used
-                </Text>
-
-                {selectedOrderMeasurement ? (
-                  <View
+                  {/* EDIT CUSTOMER */}
+                  <TouchableOpacity
                     style={
-                      styles.detailCard
+                      styles.editProfileButton
                     }
-                  >
-                    <View
-                      style={
-                        styles.measurementUsedHeader
-                      }
-                    >
-                      <View>
-                        <Text
-                          style={
-                            styles.measurementUsedType
-                          }
-                        >
-                          {
-                            selectedOrderMeasurement.type
-                          }
-                        </Text>
+                    onPress={() => {
+                      closeProfile();
 
-                        <Text
-                          style={
-                            styles.measurementUsedDate
-                          }
-                        >
-                          {
-                            selectedOrderMeasurement.date
-                          }
-                        </Text>
-                      </View>
-
-                      <Text
-                        style={
-                          styles.measurementUsedIcon
-                        }
-                      >
-                        📏
-                      </Text>
-                    </View>
-
-                    <View
-                      style={
-                        styles.detailMeasurementGrid
-                      }
-                    >
-                      <DetailMeasurement
-                        label="Bust"
-                        value={
-                          selectedOrderMeasurement.bust
-                        }
-                      />
-
-                      <DetailMeasurement
-                        label="Waist"
-                        value={
-                          selectedOrderMeasurement.waist
-                        }
-                      />
-
-                      <DetailMeasurement
-                        label="Hip"
-                        value={
-                          selectedOrderMeasurement.hip
-                        }
-                      />
-
-                      <DetailMeasurement
-                        label="Shoulder"
-                        value={
-                          selectedOrderMeasurement.shoulder
-                        }
-                      />
-
-                      <DetailMeasurement
-                        label="Sleeve"
-                        value={
-                          selectedOrderMeasurement.sleeveLength
-                        }
-                      />
-
-                      <DetailMeasurement
-                        label="Blouse Length"
-                        value={
-                          selectedOrderMeasurement.blouseLength
-                        }
-                      />
-
-                      <DetailMeasurement
-                        label="Front Neck"
-                        value={
-                          selectedOrderMeasurement.frontNeck
-                        }
-                      />
-
-                      <DetailMeasurement
-                        label="Back Neck"
-                        value={
-                          selectedOrderMeasurement.backNeck
-                        }
-                      />
-
-                      <DetailMeasurement
-                        label="Armhole"
-                        value={
-                          selectedOrderMeasurement.armhole
-                        }
-                      />
-
-                      <DetailMeasurement
-                        label="Pant Length"
-                        value={
-                          selectedOrderMeasurement.pantLength
-                        }
-                      />
-                    </View>
-
-                    {selectedOrderMeasurement.notes ? (
-                      <View
-                        style={
-                          styles.measurementNotes
-                        }
-                      >
-                        <Text
-                          style={
-                            styles.measurementNotesLabel
-                          }
-                        >
-                          Notes
-                        </Text>
-
-                        <Text
-                          style={
-                            styles.measurementNotesText
-                          }
-                        >
-                          {
-                            selectedOrderMeasurement.notes
-                          }
-                        </Text>
-                      </View>
-                    ) : null}
-                  </View>
-                ) : (
-                  <View
-                    style={
-                      styles.emptyDetailCard
-                    }
+                      openEditCustomer(
+                        selectedCustomer
+                      );
+                    }}
                   >
                     <Text
                       style={
-                        styles.emptyDetailText
+                        styles.editProfileButtonText
                       }
                     >
-                      No measurement snapshot is
-                      available for this order.
+                      Edit Customer Details
                     </Text>
-                  </View>
-                )}
+                  </TouchableOpacity>
 
-                <Text
-                  style={
-                    styles.detailSectionTitle
-                  }
-                >
-                  Billing
-                </Text>
-
-                {selectedOrderBill ? (
                   <View
                     style={
-                      styles.billDetailCard
+                      styles.bottomSpace
                     }
-                  >
-                    <View
-                      style={
-                        styles.billHeaderRow
-                      }
-                    >
-                      <View>
-                        <Text
-                          style={
-                            styles.billDetailId
-                          }
-                        >
-                          {
-                            selectedOrderBill.id
-                          }
-                        </Text>
-
-                        <Text
-                          style={
-                            styles.billDetailDate
-                          }
-                        >
-                          {
-                            selectedOrderBill.billDate
-                          }
-                        </Text>
-                      </View>
-
-                      <View
-                        style={
-                          styles.billDetailStatus
-                        }
-                      >
-                        <Text
-                          style={
-                            styles.billDetailStatusText
-                          }
-                        >
-                          {
-                            selectedOrderBill.status
-                          }
-                        </Text>
-                      </View>
-                    </View>
-
-                    <View
-                      style={
-                        styles.billAmountGrid
-                      }
-                    >
-                      <AmountBox
-                        label="Subtotal"
-                        value={formatCurrency(
-                          selectedOrderBill.subtotal
-                        )}
-                      />
-
-                      <AmountBox
-                        label="Discount"
-                        value={formatCurrency(
-                          selectedOrderBill.discount
-                        )}
-                      />
-
-                      <AmountBox
-                        label="Tax"
-                        value={formatCurrency(
-                          selectedOrderBill.tax
-                        )}
-                      />
-
-                      <AmountBox
-                        label="Total"
-                        value={formatCurrency(
-                          selectedOrderBill.total
-                        )}
-                      />
-                    </View>
-
-                    <View
-                      style={
-                        styles.paymentSummary
-                      }
-                    >
-                      <View>
-                        <Text
-                          style={
-                            styles.paymentSummaryLabel
-                          }
-                        >
-                          Paid
-                        </Text>
-
-                        <Text
-                          style={
-                            styles.paymentSummaryPaid
-                          }
-                        >
-                          {formatCurrency(
-                            selectedOrderBill.paidAmount
-                          )}
-                        </Text>
-                      </View>
-
-                      <View
-                        style={
-                          styles.paymentSummaryDivider
-                        }
-                      />
-
-                      <View>
-                        <Text
-                          style={
-                            styles.paymentSummaryLabel
-                          }
-                        >
-                          Balance
-                        </Text>
-
-                        <Text
-                          style={
-                            styles.paymentSummaryBalance
-                          }
-                        >
-                          {formatCurrency(
-                            selectedOrderBill.balance
-                          )}
-                        </Text>
-                      </View>
-                    </View>
-                  </View>
-                ) : (
-                  <View
-                    style={
-                      styles.emptyDetailCard
-                    }
-                  >
-                    <Text
-                      style={
-                        styles.emptyDetailText
-                      }
-                    >
-                      No bill has been created for
-                      this order yet.
-                    </Text>
-                  </View>
-                )}
-
-                <Text
-                  style={
-                    styles.detailSectionTitle
-                  }
-                >
-                  Payments
-                </Text>
-
-                {selectedOrderPayments.length >
-                0 ? (
-                  selectedOrderPayments.map(
-                    (payment) => (
-                      <View
-                        key={payment.id}
-                        style={
-                          styles.orderPaymentCard
-                        }
-                      >
-                        <View
-                          style={
-                            styles.orderPaymentIcon
-                          }
-                        >
-                          <Text
-                            style={
-                              styles.orderPaymentIconText
-                            }
-                          >
-                            ✓
-                          </Text>
-                        </View>
-
-                        <View
-                          style={
-                            styles.orderPaymentInfo
-                          }
-                        >
-                          <Text
-                            style={
-                              styles.orderPaymentMethod
-                            }
-                          >
-                            {
-                              payment.method
-                            }
-                          </Text>
-
-                          <Text
-                            style={
-                              styles.orderPaymentDate
-                            }
-                          >
-                            {
-                              payment.paymentDate
-                            }
-                          </Text>
-                        </View>
-
-                        <Text
-                          style={
-                            styles.orderPaymentAmount
-                          }
-                        >
-                          {formatCurrency(
-                            payment.amount
-                          )}
-                        </Text>
-                      </View>
-                    )
-                  )
-                ) : (
-                  <View
-                    style={
-                      styles.emptyDetailCard
-                    }
-                  >
-                    <Text
-                      style={
-                        styles.emptyDetailText
-                      }
-                    >
-                      No payments recorded for this
-                      order.
-                    </Text>
-                  </View>
-                )}
-
-                <TouchableOpacity
-                  style={
-                    styles.orderDetailsCloseButton
-                  }
-                  onPress={
-                    closeOrderDetails
-                  }
-                >
-                  <Text
-                    style={
-                      styles.orderDetailsCloseButtonText
-                    }
-                  >
-                    Back to Customer History
-                  </Text>
-                </TouchableOpacity>
-              </ScrollView>
-            )}
-          </View>
-        </View>
-      </Modal>
-
-      {/* =================================================
-          EDIT CUSTOMER MODAL
-      ================================================= */}
-
-      <Modal
-        visible={showEditModal}
-        animationType="slide"
-        transparent
-        onRequestClose={() =>
-          setShowEditModal(false)
-        }
-      >
-        <View style={styles.modalOverlay}>
-          <View style={styles.formModal}>
-            <ScrollView
-              showsVerticalScrollIndicator={
-                false
-              }
-            >
-              <View
-                style={styles.modalHeader}
-              >
-                <View>
-                  <Text
-                    style={
-                      styles.modalTitle
-                    }
-                  >
-                    Edit Customer
-                  </Text>
-
-                  <Text
-                    style={
-                      styles.modalSubtitle
-                    }
-                  >
-                    Update customer information
-                  </Text>
-                </View>
-
-                <TouchableOpacity
-                  style={
-                    styles.closeIconButton
-                  }
-                  onPress={() =>
-                    setShowEditModal(false)
-                  }
-                >
-                  <Text
-                    style={
-                      styles.closeIconText
-                    }
-                  >
-                    ×
-                  </Text>
-                </TouchableOpacity>
-              </View>
-
-              <Text style={styles.inputLabel}>
-                Customer Name *
-              </Text>
-
-              <TextInput
-                value={name}
-                onChangeText={setName}
-                placeholder="Enter customer name"
-                placeholderTextColor="#999"
-                style={styles.input}
-              />
-
-              <Text style={styles.inputLabel}>
-                Phone Number *
-              </Text>
-
-              <TextInput
-                value={phone}
-                onChangeText={setPhone}
-                placeholder="Enter phone number"
-                placeholderTextColor="#999"
-                keyboardType="phone-pad"
-                style={styles.input}
-              />
-
-              <Text style={styles.inputLabel}>
-                Email
-              </Text>
-
-              <TextInput
-                value={email}
-                onChangeText={setEmail}
-                placeholder="Enter email"
-                placeholderTextColor="#999"
-                keyboardType="email-address"
-                autoCapitalize="none"
-                style={styles.input}
-              />
-
-              <Text style={styles.inputLabel}>
-                Address
-              </Text>
-
-              <TextInput
-                value={address}
-                onChangeText={setAddress}
-                placeholder="Enter address"
-                placeholderTextColor="#999"
-                style={[
-                  styles.input,
-                  styles.multilineInput,
-                ]}
-                multiline
-              />
-
-              <Text style={styles.inputLabel}>
-                Notes
-              </Text>
-
-              <TextInput
-                value={notes}
-                onChangeText={setNotes}
-                placeholder="Add customer notes"
-                placeholderTextColor="#999"
-                style={[
-                  styles.input,
-                  styles.multilineInput,
-                ]}
-                multiline
-              />
-
-              <TouchableOpacity
-                style={styles.primaryButton}
-                onPress={
-                  handleUpdateCustomer
-                }
-              >
-                <Text
-                  style={
-                    styles.primaryButtonText
-                  }
-                >
-                  Save Changes
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.secondaryButton}
-                onPress={() =>
-                  setShowEditModal(false)
-                }
-              >
-                <Text
-                  style={
-                    styles.secondaryButtonText
-                  }
-                >
-                  Cancel
-                </Text>
-              </TouchableOpacity>
-            </ScrollView>
+                  />
+                </ScrollView>
+              )}
           </View>
         </View>
       </Modal>
     </View>
   );
 }
-
-/* =======================================================
-   STATUS DESCRIPTION
-======================================================= */
-
-function getStatusDescription(
-  status: OrderStatus
-): string {
-  switch (status) {
-    case "Pending":
-      return "Order has been placed and is waiting to be started.";
-
-    case "In Progress":
-      return "Tailoring work is currently in progress.";
-
-    case "Ready":
-      return "The order is completed and ready for pickup.";
-
-    case "Delivered":
-      return "The order has been delivered to the customer.";
-
-    default:
-      return "";
-  }
-}
-
-/* =======================================================
-   INFO ROW
-======================================================= */
-
-function InfoRow({
-  label,
-  value,
-  last = false,
-}: {
-  label: string;
-  value: string;
-  last?: boolean;
-}) {
-  return (
-    <View
-      style={[
-        styles.infoRow,
-        last && styles.infoRowLast,
-      ]}
-    >
-      <Text style={styles.infoLabel}>
-        {label}
-      </Text>
-
-      <Text style={styles.infoValue}>
-        {value}
-      </Text>
-    </View>
-  );
-}
-
-/* =======================================================
-   SUMMARY CARD
-======================================================= */
-
-function SummaryCard({
-  icon,
-  value,
-  label,
-}: {
-  icon: string;
-  value: number;
-  label: string;
-}) {
-  return (
-    <View style={styles.summaryCard}>
-      <Text style={styles.summaryIcon}>
-        {icon}
-      </Text>
-
-      <Text style={styles.summaryValue}>
-        {value}
-      </Text>
-
-      <Text style={styles.summaryLabel}>
-        {label}
-      </Text>
-    </View>
-  );
-}
-
-/* =======================================================
-   MEASUREMENT VALUE
-======================================================= */
-
-function MeasurementValue({
-  label,
-  value,
-}: {
-  label: string;
-  value?: string;
-}) {
-  return (
-    <View style={styles.measurementValue}>
-      <Text
-        style={
-          styles.measurementValueLabel
-        }
-      >
-        {label}
-      </Text>
-
-      <Text
-        style={
-          styles.measurementValueText
-        }
-      >
-        {value || "-"}
-      </Text>
-    </View>
-  );
-}
-
-/* =======================================================
-   DETAIL MEASUREMENT
-======================================================= */
-
-function DetailMeasurement({
-  label,
-  value,
-}: {
-  label: string;
-  value?: string;
-}) {
-  return (
-    <View
-      style={
-        styles.detailMeasurement
-      }
-    >
-      <Text
-        style={
-          styles.detailMeasurementLabel
-        }
-      >
-        {label}
-      </Text>
-
-      <Text
-        style={
-          styles.detailMeasurementValue
-        }
-      >
-        {value || "-"}
-      </Text>
-    </View>
-  );
-}
-
-/* =======================================================
-   AMOUNT BOX
-======================================================= */
-
-function AmountBox({
-  label,
-  value,
-}: {
-  label: string;
-  value: string;
-}) {
-  return (
-    <View style={styles.amountBox}>
-      <Text
-        style={
-          styles.amountBoxLabel
-        }
-      >
-        {label}
-      </Text>
-
-      <Text
-        style={
-          styles.amountBoxValue
-        }
-      >
-        {value}
-      </Text>
-    </View>
-  );
-}
-
-/* =======================================================
-   HISTORY SUMMARY
-======================================================= */
-
-function HistorySummary({
-  value,
-  label,
-}: {
-  value: string | number;
-  label: string;
-}) {
-  return (
-    <View style={styles.historySummaryCard}>
-      <Text
-        style={
-          styles.historySummaryValue
-        }
-      >
-        {value}
-      </Text>
-
-      <Text
-        style={
-          styles.historySummaryLabel
-        }
-      >
-        {label}
-      </Text>
-    </View>
-  );
-}
-
-/* =======================================================
-   EMPTY HISTORY
-======================================================= */
-
-function EmptyHistory({
-  text,
-}: {
-  text: string;
-}) {
-  return (
-    <View style={styles.emptyHistory}>
-      <Text
-        style={
-          styles.emptyHistoryText
-        }
-      >
-        {text}
-      </Text>
-    </View>
-  );
-}
-
-/* =======================================================
-   STYLES
-======================================================= */
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#FFF9F2",
-    padding: 20,
+    backgroundColor: "#FFF5F8",
   },
 
+  content: {
+    paddingHorizontal: 18,
+    paddingTop: 18,
+    paddingBottom: 110,
+
+  },
   header: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 20,
+    justifyContent: "space-between",
+    marginBottom: 24,
+    paddingTop: 10,
+    minHeight: 100,
+  },
+
+  headerText: {
+    flex: 1,
+    minWidth: 0,
+    paddingRight: 10,
+  },
+
+  eyebrow: {
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 1.6,
+    color: "#C2185B",
+    marginBottom: 5,
   },
 
   title: {
-    fontSize: 28,
-    fontWeight: "800",
-    color: "#8B1238",
+    fontSize: 30,
+    fontWeight: "900",
+    color: "#3A1727",
   },
 
   subtitle: {
-    fontSize: 13,
-    color: "#888",
+    fontSize: 12,
+    color: "#806773",
     marginTop: 4,
+    lineHeight: 18,
   },
 
   addButton: {
-    backgroundColor: "#8B1238",
+    minWidth: 150,
+    height: 46,
     paddingHorizontal: 17,
-    paddingVertical: 11,
-    borderRadius: 12,
+    borderRadius: 15,
+    backgroundColor: "#C2185B",
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    gap: 5,
+    shadowColor: "#8B1238",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.18,
+    shadowRadius: 7,
+    elevation: 4,
+  },
+
+  addButtonPlus: {
+    color: "#FFFFFF",
+    fontSize: 20,
+    fontWeight: "500",
   },
 
   addButtonText: {
     color: "#FFFFFF",
-    fontSize: 14,
-    fontWeight: "700",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+
+  sectionTitleRow: {
+    marginBottom: 12,
+  },
+
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: "900",
+    color: "#3A1727",
+  },
+
+  sectionSubtitle: {
+    fontSize: 11,
+    color: "#8A6A77",
+    marginTop: 2,
+  },
+
+  overviewGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "space-between",
+    rowGap: 14,
+    marginBottom: 20,
+
+  },
+  overviewCard: {
+    width: "48%",
+    minHeight: 124,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 20,
+    padding: 15,
+    borderWidth: 1,
+    borderColor: "#F5D9E4",
+    justifyContent: "space-between",
+    shadowColor: "#8B1238",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    elevation: 3,
+  },
+
+  overviewIcon: {
+    fontSize: 20,
+    fontWeight: "900",
+    color: "#C2185B",
+  },
+
+  overviewValue: {
+    fontSize: 20,
+    fontWeight: "900",
+    color: "#3A1727",
+    marginTop: 6,
+  },
+
+  overviewLabel: {
+    fontSize: 11,
+    color: "#8A6A77",
+    fontWeight: "600",
+  },
+
+  dueValue: {
+    color: "#C2185B",
+  },
+
+  financeCard: {
+    backgroundColor: "#C2185B",
+    borderRadius: 20,
+    padding: 17,
+    marginBottom: 16,
+  },
+
+  financeHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+
+  financeTitle: {
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontWeight: "900",
+  },
+
+  financeSubtitle: {
+    color: "#FFE0EC",
+    fontSize: 10,
+    marginTop: 2,
+  },
+
+  financeTotal: {
+    color: "#FFE0EC",
+    fontSize: 16,
+    fontWeight: "900",
+  },
+
+  financeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 17,
+  },
+
+  financeItem: {
+    flex: 1,
+  },
+
+  financeItemLabel: {
+    color: "#FCE5EF",
+    fontSize: 10,
+    marginBottom: 4,
+  },
+
+  financeItemValue: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+
+  financeDivider: {
+    width: 1,
+    height: 32,
+    backgroundColor: "#EAA9C3",
+    marginHorizontal: 10,
+  },
+
+  paidText: {
+    color: "#FFFFFF",
+  },
+
+  dueText: {
+    color: "#FFFFFF",
   },
 
   searchContainer: {
-    height: 52,
+    height: 50,
     backgroundColor: "#FFFFFF",
+
+    borderColor: "#C2185B",
     borderRadius: 15,
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 15,
-    marginBottom: 15,
-    borderWidth: 1,
-    borderColor: "#EEEEEE",
+    paddingHorizontal: 14,
+    marginBottom: 12,
   },
 
   searchIcon: {
-    fontSize: 18,
-    marginRight: 10,
+    fontSize: 22,
+    color: "#C2185B",
+    marginRight: 8,
   },
 
   searchInput: {
     flex: 1,
-    fontSize: 14,
-    color: "#242124",
+    color: "#3A1727",
+    fontSize: 13,
+    paddingVertical: 0,
   },
 
-  countRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
+  clearSearch: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: "#FCE5EF",
     alignItems: "center",
-    marginBottom: 12,
+    justifyContent: "center",
   },
 
-  countText: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: "#242124",
-  },
-
-  searchResultText: {
-    fontSize: 12,
+  clearSearchText: {
+    fontSize: 19,
+    lineHeight: 22,
     color: "#8B1238",
-    fontWeight: "600",
   },
 
-  listContent: {
-    paddingBottom: 100,
+  filterRow: {
+    gap: 8,
+    paddingBottom: 18,
+  },
+
+  filterChip: {
+    paddingHorizontal: 17,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "#F0B8CE",
+    backgroundColor: "#FFFFFF",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  filterChipActive: {
+    backgroundColor: "#C2185B",
+    borderColor: "#C2185B",
+  },
+
+  filterChipText: {
+    color: "#8B1238",
+    fontSize: 11,
+    fontWeight: "700",
+  },
+
+  filterChipTextActive: {
+    color: "#FFFFFF",
+  },
+
+  listHeader: {
+    marginBottom: 12,
   },
 
   customerCard: {
     backgroundColor: "#FFFFFF",
-    borderRadius: 18,
-    padding: 16,
-    marginBottom: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    elevation: 2,
-    shadowColor: "#000",
-    shadowOpacity: 0.05,
-    shadowRadius: 5,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: "#F5D9E4",
+    padding: 17,
+    marginBottom: 15,
+    shadowColor: "#8B1238",
     shadowOffset: {
       width: 0,
-      height: 2,
+      height: 4,
     },
+    shadowOpacity: 0.07,
+    shadowRadius: 10,
+    elevation: 3,
+  },
+
+  customerTop: {
+    flexDirection: "row",
+    alignItems: "flex-start",
   },
 
   avatar: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    backgroundColor: "#FCE8F0",
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: "#FCE5EF",
     alignItems: "center",
     justifyContent: "center",
-    marginRight: 13,
+    marginRight: 11,
   },
 
   avatarText: {
-    fontSize: 20,
-    fontWeight: "800",
-    color: "#8B1238",
+    color: "#C2185B",
+    fontSize: 15,
+    fontWeight: "900",
   },
 
-  customerInfo: {
+  customerMain: {
     flex: 1,
+    minWidth: 0,
+  },
+
+  customerNameRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
   },
 
   customerName: {
-    fontSize: 17,
-    fontWeight: "700",
-    color: "#242124",
+    flexShrink: 1,
+    color: "#36222B",
+    fontSize: 16,
+    fontWeight: "900",
   },
 
   customerPhone: {
-    fontSize: 13,
-    color: "#666",
-    marginTop: 4,
-  },
-
-  customerId: {
+    color: "#725E67",
     fontSize: 11,
-    color: "#999",
     marginTop: 4,
   },
 
-  customerRight: {
-    alignItems: "center",
-    minWidth: 50,
-  },
-
-  orderCount: {
-    fontSize: 17,
-    fontWeight: "800",
-    color: "#8B1238",
-  },
-
-  orderLabel: {
+  customerEmail: {
+    color: "#A18E95",
     fontSize: 10,
-    color: "#888",
+    marginTop: 2,
   },
 
-  arrow: {
-    fontSize: 25,
-    color: "#AAA",
+  healthBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 4,
+    borderRadius: 10,
+    backgroundColor: "#F1ECEE",
+  },
+
+  healthBadgeDanger: {
+    backgroundColor: "#FBE7E9",
+  },
+
+  healthBadgeWarning: {
+    backgroundColor: "#FFF2D9",
+  },
+
+  healthBadgeInfo: {
+    backgroundColor: "#E8F0F7",
+  },
+
+  healthBadgeSuccess: {
+    backgroundColor: "#E6F3EC",
+  },
+
+  healthBadgeText: {
+    color: "#75616A",
+    fontSize: 8,
+    fontWeight: "800",
+  },
+
+  healthBadgeTextDanger: {
+    color: "#AF3949",
+  },
+
+  healthBadgeTextWarning: {
+    color: "#9B6A1D",
+  },
+
+  healthBadgeTextInfo: {
+    color: "#456B88",
+  },
+
+  healthBadgeTextSuccess: {
+    color: "#367557",
+  },
+
+  editButton: {
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    borderRadius: 9,
+    backgroundColor: "#FCE5EF",
+  },
+
+  editButtonText: {
+    color: "#C2185B",
+    fontSize: 10,
+    fontWeight: "800",
+  },
+
+  metricsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#FFF5F8",
+    borderRadius: 14,
+    marginTop: 14,
+    paddingVertical: 11,
+  },
+
+  metricBox: {
+    flex: 1,
+    alignItems: "center",
+  },
+
+  metricValue: {
+    color: "#3A2630",
+    fontSize: 13,
+    fontWeight: "900",
+  },
+
+  metricLabel: {
+    color: "#97838B",
+    fontSize: 8,
+    marginTop: 3,
+    textAlign: "center",
+  },
+
+  metricDivider: {
+    width: 1,
+    height: 25,
+    backgroundColor: "#E5D9DD",
+  },
+
+  activeMetric: {
+    color: "#4B7D65",
+  },
+
+  dueMetric: {
+    color: "#C2185B",
+  },
+
+  latestOrderBox: {
+    backgroundColor: "#FFF9FB",
+    borderWidth: 1,
+    borderColor: "#F0E4E8",
+    borderRadius: 14,
+    padding: 12,
+    marginTop: 10,
+  },
+
+  latestOrderHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+
+  latestOrderTitle: {
+    color: "#725965",
+    fontSize: 9,
+    fontWeight: "900",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+
+  deliveryLabel: {
+    color: "#8B7780",
+    fontSize: 9,
+    fontWeight: "800",
+  },
+
+  deliveryDanger: {
+    color: "#C2185B",
+  },
+
+  deliveryWarning: {
+    color: "#A06C18",
+  },
+
+  deliverySuccess: {
+    color: "#3D7C5D",
+  },
+
+  deliveryInfo: {
+    color: "#4A6F89",
+  },
+
+  latestOrderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 7,
+  },
+
+  latestOrderInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+
+  latestOrderItem: {
+    color: "#3B2730",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+
+  latestOrderMeta: {
+    color: "#917E86",
+    fontSize: 9,
     marginTop: 3,
   },
 
-  emptyState: {
+  latestOrderDate: {
+    color: "#80616E",
+    fontSize: 9,
+    fontWeight: "700",
+    marginLeft: 8,
+  },
+
+  progressTrack: {
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: "#EDE4E7",
+    overflow: "hidden",
+    marginTop: 10,
+  },
+
+  progressFill: {
+    height: "100%",
+    borderRadius: 3,
+    backgroundColor: "#C2185B",
+  },
+
+  progressBottom: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: 5,
+  },
+
+  progressStatus: {
+    color: "#806A73",
+    fontSize: 8,
+    fontWeight: "700",
+  },
+
+  progressPercent: {
+    color: "#C2185B",
+    fontSize: 8,
+    fontWeight: "900",
+  },
+
+  cardActions: {
+    flexDirection: "row",
+    borderTopWidth: 1,
+    borderTopColor: "#F0E5E8",
+    marginTop: 13,
+    paddingTop: 11,
+  },
+
+  cardAction: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  cardActionIcon: {
+    color: "#C2185B",
+    fontSize: 14,
+    marginBottom: 3,
+  },
+
+  cardActionText: {
+    color: "#8B1238",
+    fontSize: 8,
+    fontWeight: "700",
+    textAlign: "center",
+  },
+
+  emptyCard: {
     backgroundColor: "#FFFFFF",
     borderRadius: 20,
-    padding: 35,
+    borderWidth: 1,
+    borderColor: "#EDE1E5",
+    padding: 30,
     alignItems: "center",
-    marginTop: 30,
   },
 
   emptyIcon: {
-    fontSize: 45,
-    marginBottom: 15,
+    fontSize: 34,
+    color: "#C68AA1",
+    marginBottom: 8,
   },
 
   emptyTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: "#242124",
+    color: "#3A1727",
+    fontSize: 16,
+    fontWeight: "900",
   },
 
   emptyText: {
-    fontSize: 13,
-    color: "#888",
+    color: "#927D85",
+    fontSize: 11,
     textAlign: "center",
-    marginTop: 6,
-    lineHeight: 20,
+    lineHeight: 17,
+    marginTop: 5,
   },
 
   emptyButton: {
-    marginTop: 18,
-    backgroundColor: "#8B1238",
+    marginTop: 16,
+    backgroundColor: "#C2185B",
     paddingHorizontal: 18,
     paddingVertical: 11,
     borderRadius: 12,
   },
 
   emptyButtonText: {
-    color: "#FFF",
-    fontWeight: "700",
+    color: "#FFFFFF",
+    fontSize: 11,
+    fontWeight: "800",
   },
 
   modalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.45)",
+    backgroundColor:
+      "rgba(35, 20, 27, 0.52)",
     justifyContent: "flex-end",
   },
 
-  formModal: {
-    backgroundColor: "#FFF9F2",
+  modalContainer: {
+    maxHeight: "90%",
+    backgroundColor: "#FFF5F8",
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
-    maxHeight: "92%",
     padding: 20,
   },
 
-  profileModal: {
-    backgroundColor: "#FFF9F2",
+  profileModalContainer: {
+    height: "94%",
+    backgroundColor: "#FFF5F8",
     borderTopLeftRadius: 28,
     borderTopRightRadius: 28,
-    maxHeight: "94%",
-    padding: 20,
-  },
-
-  historyModal: {
-    backgroundColor: "#FFF9F2",
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
-    maxHeight: "94%",
-    padding: 20,
-  },
-
-  orderDetailsModal: {
-    backgroundColor: "#FFF9F2",
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
-    maxHeight: "96%",
     padding: 20,
   },
 
   modalHeader: {
     flexDirection: "row",
+    alignItems: "center",
     justifyContent: "space-between",
-    alignItems: "flex-start",
-    marginBottom: 25,
+    marginBottom: 18,
+  },
+
+  modalEyebrow: {
+    color: "#C2185B",
+    fontSize: 9,
+    fontWeight: "900",
+    letterSpacing: 1.2,
+    marginBottom: 3,
   },
 
   modalTitle: {
-    fontSize: 24,
-    fontWeight: "800",
     color: "#8B1238",
-  },
-
-  modalSubtitle: {
-    fontSize: 13,
-    color: "#888",
-    marginTop: 4,
-  },
-
-  closeIconButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: "#FCE8F0",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  closeIconText: {
-    fontSize: 25,
-    color: "#555",
-    lineHeight: 27,
-  },
-
-  inputLabel: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: "#242124",
-    marginBottom: 7,
-    marginTop: 5,
-  },
-
-  input: {
-    height: 50,
-    backgroundColor: "#FFFFFF",
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#E6E6E6",
-    paddingHorizontal: 14,
-    fontSize: 14,
-    color: "#242124",
-    marginBottom: 15,
-  },
-
-  multilineInput: {
-    minHeight: 80,
-    height: 80,
-    paddingTop: 13,
-    textAlignVertical: "top",
-  },
-
-  primaryButton: {
-    backgroundColor: "#8B1238",
-    height: 52,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-    marginTop: 8,
-  },
-
-  primaryButtonText: {
-    color: "#FFFFFF",
-    fontSize: 15,
-    fontWeight: "700",
-  },
-
-  secondaryButton: {
-    height: 50,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-    marginTop: 10,
-    marginBottom: 20,
-    backgroundColor: "#EEEEEE",
-  },
-
-  secondaryButtonText: {
-    color: "#242124",
-    fontSize: 14,
-    fontWeight: "700",
-  },
-
-  profileHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 22,
-  },
-
-  largeAvatar: {
-    width: 66,
-    height: 66,
-    borderRadius: 33,
-    backgroundColor: "#FCE8F0",
-    alignItems: "center",
-    justifyContent: "center",
-    marginRight: 14,
-  },
-
-  largeAvatarText: {
-    fontSize: 26,
-    fontWeight: "800",
-    color: "#8B1238",
-  },
-
-  profileHeaderInfo: {
-    flex: 1,
-  },
-
-  profileName: {
     fontSize: 22,
-    fontWeight: "800",
-    color: "#8B1238",
-  },
-
-  profilePhone: {
-    fontSize: 13,
-    color: "#666",
-    marginTop: 4,
-  },
-
-  profileCustomerId: {
-    fontSize: 11,
-    color: "#999",
-    marginTop: 3,
-  },
-
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: "800",
-    color: "#8B1238",
-    marginBottom: 11,
-    marginTop: 6,
-  },
-
-  infoCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 16,
-    paddingHorizontal: 15,
-    marginBottom: 20,
-  },
-
-  infoRow: {
-    paddingVertical: 13,
-    borderBottomWidth: 1,
-    borderBottomColor: "#F0F0F0",
-  },
-
-  infoRowLast: {
-    borderBottomWidth: 0,
-  },
-
-  infoLabel: {
-    fontSize: 11,
-    color: "#999",
-    marginBottom: 4,
-  },
-
-  infoValue: {
-    fontSize: 14,
-    color: "#242124",
-    fontWeight: "600",
-    lineHeight: 20,
-  },
-
-  summaryGrid: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginBottom: 15,
-  },
-
-  summaryCard: {
-    width: "31.5%",
-    backgroundColor: "#FFFFFF",
-    borderRadius: 15,
-    paddingVertical: 14,
-    alignItems: "center",
-  },
-
-  summaryIcon: {
-    fontSize: 22,
-    marginBottom: 5,
-  },
-
-  summaryValue: {
-    fontSize: 19,
-    fontWeight: "800",
-    color: "#242124",
-  },
-
-  summaryLabel: {
-    fontSize: 11,
-    color: "#888",
-    marginTop: 2,
-  },
-
-  balanceCard: {
-    backgroundColor: "#FCE8F0",
-    borderRadius: 17,
-    padding: 17,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 20,
-  },
-
-  balanceLabel: {
-    fontSize: 12,
-    color: "#8B1238",
-    fontWeight: "600",
-  },
-
-  balanceAmount: {
-    fontSize: 25,
-    color: "#8B1238",
-    fontWeight: "800",
-    marginTop: 3,
-  },
-
-  balanceIcon: {
-    fontSize: 32,
-  },
-
-  sectionHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-
-  linkText: {
-    color: "#8B1238",
-    fontSize: 13,
-    fontWeight: "700",
-    marginBottom: 10,
-  },
-
-  measurementCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 17,
-    padding: 16,
-    marginBottom: 15,
-  },
-
-  measurementHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 15,
-  },
-
-  measurementType: {
-    fontSize: 16,
-    fontWeight: "800",
-    color: "#8B1238",
-  },
-
-  measurementDate: {
-    fontSize: 11,
-    color: "#888",
-    marginTop: 3,
-  },
-
-  measurementIcon: {
-    fontSize: 25,
-  },
-
-  measurementGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "space-between",
-  },
-
-  measurementValue: {
-    width: "48%",
-    backgroundColor: "#FFF9F2",
-    borderRadius: 10,
-    padding: 10,
-    marginBottom: 8,
-  },
-
-  measurementValueLabel: {
-    fontSize: 10,
-    color: "#888",
-  },
-
-  measurementValueText: {
-    fontSize: 15,
-    fontWeight: "700",
-    color: "#242124",
-    marginTop: 2,
-  },
-
-  measurementButton: {
-    marginTop: 7,
-    backgroundColor: "#FCE8F0",
-    borderRadius: 11,
-    paddingVertical: 11,
-    alignItems: "center",
-  },
-
-  measurementButtonText: {
-    color: "#8B1238",
-    fontSize: 13,
-    fontWeight: "700",
-  },
-
-  emptySmallCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 17,
-    padding: 20,
-    alignItems: "center",
-    marginBottom: 15,
-  },
-
-  emptySmallIcon: {
-    fontSize: 28,
-    marginBottom: 7,
-  },
-
-  emptySmallTitle: {
-    fontSize: 14,
-    color: "#555",
-    fontWeight: "600",
-    marginBottom: 5,
-  },
-
-  historyButton: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 17,
-    padding: 14,
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 15,
-    borderWidth: 1,
-    borderColor: "#F1D9DF",
-  },
-
-  historyButtonIcon: {
-    width: 45,
-    height: 45,
-    borderRadius: 13,
-    backgroundColor: "#FCE8F0",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  historyIconText: {
-    fontSize: 22,
-  },
-
-  historyButtonInfo: {
-    flex: 1,
-    marginLeft: 12,
-  },
-
-  historyButtonTitle: {
-    fontSize: 15,
-    fontWeight: "800",
-    color: "#8B1238",
-  },
-
-  historyButtonSubtitle: {
-    fontSize: 11,
-    color: "#888",
-    marginTop: 3,
-  },
-
-  historyArrow: {
-    fontSize: 26,
-    color: "#AAA",
-  },
-
-  actionContainer: {
-    marginBottom: 25,
-  },
-
-  editButton: {
-    backgroundColor: "#8B1238",
-    height: 50,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 10,
-  },
-
-  editButtonText: {
-    color: "#FFFFFF",
-    fontSize: 14,
-    fontWeight: "700",
+    fontWeight: "900",
   },
 
   closeButton: {
-    height: 50,
-    borderRadius: 14,
-    backgroundColor: "#EEEEEE",
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: "#FCE5EF",
     alignItems: "center",
     justifyContent: "center",
   },
 
   closeButtonText: {
-    color: "#242124",
-    fontSize: 14,
-    fontWeight: "700",
-  },
-
-  /* =====================================================
-     HISTORY
-  ===================================================== */
-
-  historyHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    marginBottom: 20,
-  },
-
-  historySummary: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginBottom: 22,
-  },
-
-  historySummaryCard: {
-    width: "23.5%",
-    backgroundColor: "#FFFFFF",
-    borderRadius: 13,
-    paddingVertical: 12,
-    alignItems: "center",
-  },
-
-  historySummaryValue: {
-    fontSize: 14,
-    fontWeight: "800",
     color: "#8B1238",
+    fontSize: 25,
+    lineHeight: 27,
   },
 
-  historySummaryLabel: {
-    fontSize: 9,
-    color: "#888",
+  inputLabel: {
+    color: "#8B1238",
+    fontSize: 11,
+    fontWeight: "800",
+    marginBottom: 6,
+    marginTop: 8,
+  },
+
+  input: {
+    minHeight: 48,
+    borderRadius: 13,
+    borderWidth: 1,
+    borderColor: "#F0B8CE",
+    backgroundColor: "#FFFFFF",
+    paddingHorizontal: 13,
+    color: "#38242D",
+    fontSize: 13,
+  },
+
+  multilineInput: {
+    minHeight: 80,
+    paddingTop: 13,
+    textAlignVertical: "top",
+  },
+
+  saveButton: {
+    height: 50,
+    borderRadius: 14,
+    backgroundColor: "#C2185B",
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 20,
+  },
+
+  saveButtonText: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "900",
+  },
+
+  cancelButton: {
+    height: 46,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 8,
+    marginBottom: 10,
+  },
+
+  cancelButtonText: {
+    color: "#8B1238",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+
+  profileContent: {
+    paddingBottom: 35,
+  },
+
+  profileHero: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#FFFFFF",
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: "#EDE1E5",
+    padding: 15,
+  },
+
+  profileAvatar: {
+    width: 65,
+    height: 65,
+    borderRadius: 33,
+    backgroundColor: "#FCE5EF",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 13,
+  },
+
+  profileAvatarText: {
+    color: "#C2185B",
+    fontSize: 19,
+    fontWeight: "900",
+  },
+
+  profileHeroText: {
+    flex: 1,
+  },
+
+  profileName: {
+    color: "#36222B",
+    fontSize: 20,
+    fontWeight: "900",
+  },
+
+  profilePhone: {
+    color: "#705A64",
+    fontSize: 11,
+    marginTop: 4,
+  },
+
+  profileEmail: {
+    color: "#9A858D",
+    fontSize: 10,
     marginTop: 3,
   },
 
-  historySectionTitle: {
-    fontSize: 17,
-    fontWeight: "800",
+  profileStatusCard: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    backgroundColor: "#C2185B",
+    borderRadius: 17,
+    padding: 15,
+    marginTop: 10,
+  },
+
+  profileStatusRight: {
+    alignItems: "flex-end",
+  },
+
+  profileStatusLabel: {
+    color: "#CBBAC1",
+    fontSize: 9,
+    fontWeight: "700",
+  },
+
+  profileStatusValue: {
+    color: "#FFFFFF",
+    fontSize: 13,
+    fontWeight: "900",
+    marginTop: 3,
+  },
+
+  profileSectionTitle: {
     color: "#8B1238",
-    marginBottom: 10,
-    marginTop: 6,
+    fontSize: 15,
+    fontWeight: "900",
+    marginTop: 20,
+    marginBottom: 9,
+  },
+
+  profileGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 9,
+  },
+
+  profileStatCard: {
+    width: "31%",
+    minHeight: 82,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "#EDE1E5",
+    padding: 10,
+    justifyContent: "center",
+  },
+
+  profileStatValue: {
+    color: "#3A2630",
+    fontSize: 14,
+    fontWeight: "900",
+  },
+
+  profileStatLabel: {
+    color: "#97828A",
+    fontSize: 8,
+    marginTop: 4,
+  },
+
+  detailsCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: "#EDE1E5",
+    paddingHorizontal: 14,
+  },
+
+  detailRow: {
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: "#F1E8EB",
+  },
+
+  detailLabel: {
+    color: "#9A858D",
+    fontSize: 9,
+    fontWeight: "800",
+    marginBottom: 4,
+  },
+
+  detailValue: {
+    color: "#443039",
+    fontSize: 12,
+    lineHeight: 17,
+  },
+
+  insightCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: "#EDE1E5",
+    padding: 13,
+  },
+
+  insightRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingVertical: 7,
+  },
+
+  insightIconBox: {
+    width: 36,
+    height: 36,
+    borderRadius: 11,
+    backgroundColor: "#FCE5EF",
+    alignItems: "center",
+    justifyContent: "center",
+    marginRight: 10,
+  },
+
+  insightIcon: {
+    color: "#C2185B",
+    fontSize: 15,
+    fontWeight: "900",
+  },
+
+  insightText: {
+    flex: 1,
+  },
+
+  insightTitle: {
+    color: "#98828B",
+    fontSize: 9,
+    fontWeight: "700",
+  },
+
+  insightValue: {
+    color: "#3C2931",
+    fontSize: 11,
+    fontWeight: "800",
+    marginTop: 3,
+  },
+
+  quickActionGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 9,
+  },
+
+  quickAction: {
+    width: "48.5%",
+    minHeight: 72,
+    borderRadius: 15,
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#EDE1E5",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  quickActionIcon: {
+    color: "#C2185B",
+    fontSize: 18,
+    fontWeight: "900",
+    marginBottom: 5,
+  },
+
+  quickActionText: {
+    color: "#8B1238",
+    fontSize: 10,
+    fontWeight: "800",
   },
 
   historyCard: {
     backgroundColor: "#FFFFFF",
     borderRadius: 16,
-    padding: 15,
-    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "#EDE1E5",
+    padding: 13,
+    marginBottom: 9,
   },
 
-  historyCardTop: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-  },
-
-  historyCardInfo: {
-    flex: 1,
-  },
-
-  historyCardTitle: {
-    fontSize: 14,
-    fontWeight: "800",
-    color: "#242124",
-  },
-
-  historyCardSubtitle: {
-    fontSize: 13,
-    color: "#666",
-    marginTop: 3,
-  },
-
-  historyStatus: {
-    backgroundColor: "#FCE8F0",
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    borderRadius: 10,
-  },
-
-  historyStatusText: {
-    fontSize: 10,
-    fontWeight: "700",
-    color: "#8B1238",
-  },
-
-  historyCardBottom: {
+  historyTop: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    marginTop: 13,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: "#F0F0F0",
+  },
+
+  historyMain: {
+    flex: 1,
+    minWidth: 0,
+  },
+
+  historyTitle: {
+    color: "#3C2931",
+    fontSize: 12,
+    fontWeight: "900",
   },
 
   historyMeta: {
-    fontSize: 11,
-    color: "#888",
+    color: "#99848C",
+    fontSize: 9,
+    marginTop: 3,
   },
 
   historyAmount: {
-    fontSize: 14,
+    color: "#7E3E5A",
+    fontSize: 12,
+    fontWeight: "900",
+    marginLeft: 8,
+  },
+
+  historyStatusRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 10,
+  },
+
+  historyStatus: {
+    color: "#705965",
+    fontSize: 9,
     fontWeight: "800",
-    color: "#242124",
   },
 
-  historyCardArrow: {
-    fontSize: 22,
-    color: "#AAA",
-    marginLeft: 5,
+  historyDelivery: {
+    color: "#85717A",
+    fontSize: 9,
+    fontWeight: "800",
   },
 
-  tapForDetails: {
-    fontSize: 10,
-    color: "#8B1238",
-    fontWeight: "600",
+  historyProgressTrack: {
+    height: 4,
+    backgroundColor: "#EEE5E8",
+    borderRadius: 2,
+    overflow: "hidden",
     marginTop: 8,
   },
 
-  billStatusBadge: {
-    backgroundColor: "#E8F8ED",
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    borderRadius: 10,
+  historyProgressFill: {
+    height: "100%",
+    backgroundColor: "#A14E70",
+    borderRadius: 2,
   },
 
-  billStatusText: {
-    fontSize: 10,
-    fontWeight: "700",
-    color: "#218838",
-  },
-
-  billDetailsRow: {
+  historyDateRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-    marginTop: 14,
-    paddingTop: 11,
-    borderTopWidth: 1,
-    borderTopColor: "#F0F0F0",
+    marginTop: 7,
   },
 
-  historyDetailValue: {
-    fontSize: 12,
-    color: "#242124",
-    fontWeight: "700",
-    marginTop: 3,
+  historyDate: {
+    color: "#A08C94",
+    fontSize: 8,
   },
 
-  historyBalanceValue: {
-    fontSize: 12,
-    color: "#8B1238",
-    fontWeight: "800",
-    marginTop: 3,
+  historyEmpty: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: "#EDE1E5",
+    padding: 18,
+    alignItems: "center",
   },
 
-  paymentCard: {
+  historyEmptyText: {
+    color: "#8A6A77",
+    fontSize: 10,
+  },
+
+  billHistoryCard: {
     backgroundColor: "#FFFFFF",
     borderRadius: 16,
-    padding: 14,
-    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "#EDE1E5",
+    padding: 13,
+    marginBottom: 9,
+  },
+
+  billHistoryTop: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+
+  billHistoryNumber: {
+    color: "#3B2730",
+    fontSize: 11,
+    fontWeight: "900",
+  },
+
+  billHistoryDate: {
+    color: "#9A858D",
+    fontSize: 9,
+    marginTop: 3,
+  },
+
+  billHistoryAmountBox: {
+    alignItems: "flex-end",
+  },
+
+  billHistoryAmount: {
+    color: "#7E3E5A",
+    fontSize: 13,
+    fontWeight: "900",
+  },
+
+  billStatus: {
+    color: "#3F7A5C",
+    fontSize: 8,
+    fontWeight: "900",
+    marginTop: 2,
+  },
+
+  billStatusDue: {
+    color: "#C2185B",
+  },
+
+  billHistoryRow: {
     flexDirection: "row",
     alignItems: "center",
+    marginTop: 11,
+    paddingTop: 9,
+    borderTopWidth: 1,
+    borderTopColor: "#F1E8EB",
   },
 
-  paymentIcon: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: "#E7F8ED",
+  billHistoryLabel: {
+    color: "#9A858D",
+    fontSize: 9,
+    marginRight: 5,
+  },
+
+  billHistoryPaid: {
+    color: "#3E7B5B",
+    fontSize: 10,
+    fontWeight: "800",
+    marginRight: 18,
+  },
+
+  billHistoryBalance: {
+    color: "#443039",
+    fontSize: 10,
+    fontWeight: "800",
+  },
+
+  paymentHistoryCard: {
+    backgroundColor: "#FFFFFF",
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: "#EDE1E5",
+    padding: 12,
+    marginBottom: 8,
+    flexDirection: "row",
+    justifyContent: "space-between",
     alignItems: "center",
-    justifyContent: "center",
   },
 
-  paymentIconText: {
-    fontSize: 19,
-    fontWeight: "800",
-    color: "#218838",
+  paymentMethod: {
+    color: "#443039",
+    fontSize: 10,
+    fontWeight: "900",
   },
 
-  paymentInfo: {
-    flex: 1,
-    marginLeft: 11,
-  },
-
-  paymentTitle: {
-    fontSize: 13,
-    fontWeight: "800",
-    color: "#242124",
-  },
-
-  paymentSubtitle: {
-    fontSize: 11,
-    color: "#888",
+  paymentDate: {
+    color: "#9A858D",
+    fontSize: 8,
     marginTop: 3,
   },
 
   paymentAmount: {
-    fontSize: 14,
-    fontWeight: "800",
-    color: "#218838",
+    color: "#3D805E",
+    fontSize: 13,
+    fontWeight: "900",
   },
 
   measurementHistoryCard: {
     backgroundColor: "#FFFFFF",
-    borderRadius: 16,
-    padding: 15,
-    marginBottom: 10,
-  },
-
-  measurementHistoryTitle: {
-    fontSize: 14,
-    fontWeight: "800",
-    color: "#8B1238",
-  },
-
-  measurementHistoryDate: {
-    fontSize: 11,
-    color: "#888",
-    marginTop: 3,
-  },
-
-  measurementHistoryValues: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    marginTop: 12,
-  },
-
-  measurementHistoryValue: {
-    width: "50%",
-    fontSize: 11,
-    color: "#555",
-    marginBottom: 6,
-  },
-
-  emptyHistory: {
-    backgroundColor: "#FFFFFF",
     borderRadius: 15,
-    padding: 17,
-    marginBottom: 16,
-  },
-
-  emptyHistoryText: {
-    fontSize: 12,
-    color: "#999",
-    textAlign: "center",
-  },
-
-  historyMeasurementsButton: {
-    backgroundColor: "#8B1238",
-    height: 50,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-    marginTop: 8,
-    marginBottom: 10,
-  },
-
-  historyMeasurementsButtonText: {
-    color: "#FFFFFF",
-    fontSize: 14,
-    fontWeight: "700",
-  },
-
-  historyCloseButton: {
-    height: 50,
-    borderRadius: 14,
-    backgroundColor: "#EEEEEE",
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 25,
-  },
-
-  historyCloseButtonText: {
-    color: "#242124",
-    fontSize: 14,
-    fontWeight: "700",
-  },
-
-  /* =====================================================
-     ORDER DETAILS
-  ===================================================== */
-
-  orderDetailsHeader: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    justifyContent: "space-between",
-    marginBottom: 22,
-  },
-
-  orderDetailsHeaderInfo: {
-    flex: 1,
-  },
-
-  orderDetailsTitle: {
-    fontSize: 24,
-    fontWeight: "800",
-    color: "#8B1238",
-  },
-
-  orderNumberText: {
-    fontSize: 13,
-    color: "#8B1238",
-    fontWeight: "700",
-    marginTop: 5,
-  },
-
-  detailSectionTitle: {
-    fontSize: 17,
-    fontWeight: "800",
-    color: "#8B1238",
-    marginTop: 5,
-    marginBottom: 11,
-  },
-
-  detailCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 16,
-    paddingHorizontal: 15,
-    marginBottom: 18,
-  },
-
-  /* =====================================================
-     TIMELINE
-  ===================================================== */
-
-  statusTimelineCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 17,
-    padding: 17,
-    marginBottom: 18,
-  },
-
-  timelineRow: {
-    flexDirection: "row",
-    minHeight: 68,
-  },
-
-  timelineIndicatorColumn: {
-    width: 34,
-    alignItems: "center",
-  },
-
-  timelineCircle: {
-    width: 25,
-    height: 25,
-    borderRadius: 13,
-    borderWidth: 2,
-    borderColor: "#D8D8D8",
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#FFFFFF",
-  },
-
-  timelineCircleCompleted: {
-    backgroundColor: "#8B1238",
-    borderColor: "#8B1238",
-  },
-
-  timelineCircleCurrent: {
-    borderWidth: 3,
-  },
-
-  timelineCircleText: {
-    color: "#FFFFFF",
-    fontSize: 12,
-    fontWeight: "800",
-  },
-
-  timelineLine: {
-    width: 2,
-    flex: 1,
-    backgroundColor: "#E3E3E3",
-    marginVertical: 3,
-  },
-
-  timelineLineCompleted: {
-    backgroundColor: "#8B1238",
-  },
-
-  timelineContent: {
-    flex: 1,
-    paddingLeft: 11,
-    paddingBottom: 13,
-  },
-
-  timelineStatus: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: "#888",
-  },
-
-  timelineStatusCompleted: {
-    color: "#242124",
-  },
-
-  timelineDescription: {
-    fontSize: 11,
-    color: "#999",
-    marginTop: 3,
-    lineHeight: 16,
-  },
-
-  /* =====================================================
-     MEASUREMENT DETAILS
-  ===================================================== */
-
-  measurementUsedHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    paddingTop: 14,
-    paddingBottom: 15,
-  },
-
-  measurementUsedType: {
-    fontSize: 16,
-    fontWeight: "800",
-    color: "#8B1238",
-  },
-
-  measurementUsedDate: {
-    fontSize: 11,
-    color: "#888",
-    marginTop: 3,
-  },
-
-  measurementUsedIcon: {
-    fontSize: 26,
-  },
-
-  detailMeasurementGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "space-between",
-    paddingBottom: 5,
-  },
-
-  detailMeasurement: {
-    width: "48%",
-    backgroundColor: "#FFF9F2",
-    borderRadius: 10,
-    padding: 11,
+    borderWidth: 1,
+    borderColor: "#EDE1E5",
+    padding: 13,
     marginBottom: 8,
-  },
-
-  detailMeasurementLabel: {
-    fontSize: 10,
-    color: "#888",
-  },
-
-  detailMeasurementValue: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: "#242124",
-    marginTop: 3,
-  },
-
-  measurementNotes: {
-    borderTopWidth: 1,
-    borderTopColor: "#F0F0F0",
-    paddingVertical: 13,
-  },
-
-  measurementNotesLabel: {
-    fontSize: 10,
-    color: "#999",
-    fontWeight: "700",
-  },
-
-  measurementNotesText: {
-    fontSize: 12,
-    color: "#555",
-    marginTop: 4,
-    lineHeight: 18,
-  },
-
-  emptyDetailCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 16,
-    padding: 18,
-    marginBottom: 18,
-  },
-
-  emptyDetailText: {
-    fontSize: 12,
-    color: "#999",
-    textAlign: "center",
-    lineHeight: 18,
-  },
-
-  /* =====================================================
-     BILL DETAILS
-  ===================================================== */
-
-  billDetailCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 17,
-    padding: 16,
-    marginBottom: 18,
-  },
-
-  billHeaderRow: {
     flexDirection: "row",
+    alignItems: "center",
     justifyContent: "space-between",
-    alignItems: "flex-start",
   },
 
-  billDetailId: {
-    fontSize: 14,
-    fontWeight: "800",
-    color: "#242124",
-  },
-
-  billDetailDate: {
-    fontSize: 11,
-    color: "#888",
-    marginTop: 3,
-  },
-
-  billDetailStatus: {
-    backgroundColor: "#E8F8ED",
-    borderRadius: 10,
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-  },
-
-  billDetailStatusText: {
-    color: "#218838",
+  measurementTitle: {
+    color: "#443039",
     fontSize: 10,
-    fontWeight: "700",
+    fontWeight: "900",
   },
 
-  billAmountGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    justifyContent: "space-between",
-    marginTop: 15,
-  },
-
-  amountBox: {
-    width: "48%",
-    backgroundColor: "#FFF9F2",
-    borderRadius: 11,
-    padding: 11,
-    marginBottom: 8,
-  },
-
-  amountBoxLabel: {
-    fontSize: 10,
-    color: "#888",
-  },
-
-  amountBoxValue: {
-    fontSize: 13,
-    fontWeight: "800",
-    color: "#242124",
+  measurementDate: {
+    color: "#9A858D",
+    fontSize: 8,
     marginTop: 3,
   },
 
-  paymentSummary: {
-    flexDirection: "row",
-    justifyContent: "space-around",
-    alignItems: "center",
-    backgroundColor: "#FCE8F0",
-    borderRadius: 13,
-    paddingVertical: 14,
-    marginTop: 7,
-  },
-
-  paymentSummaryLabel: {
-    fontSize: 10,
-    color: "#777",
-    textAlign: "center",
-  },
-
-  paymentSummaryPaid: {
-    fontSize: 17,
-    fontWeight: "800",
-    color: "#218838",
-    marginTop: 3,
-  },
-
-  paymentSummaryBalance: {
-    fontSize: 17,
-    fontWeight: "800",
-    color: "#8B1238",
-    marginTop: 3,
-  },
-
-  paymentSummaryDivider: {
-    width: 1,
-    height: 35,
-    backgroundColor: "#E8B8C8",
-  },
-
-  /* =====================================================
-     ORDER PAYMENTS
-  ===================================================== */
-
-  orderPaymentCard: {
-    backgroundColor: "#FFFFFF",
-    borderRadius: 16,
-    padding: 14,
-    marginBottom: 10,
-    flexDirection: "row",
-    alignItems: "center",
-  },
-
-  orderPaymentIcon: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: "#E7F8ED",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-
-  orderPaymentIconText: {
+  measurementArrow: {
+    color: "#C2185B",
     fontSize: 18,
-    color: "#218838",
     fontWeight: "800",
   },
 
-  orderPaymentInfo: {
-    flex: 1,
-    marginLeft: 11,
-  },
-
-  orderPaymentMethod: {
-    fontSize: 13,
-    fontWeight: "800",
-    color: "#242124",
-  },
-
-  orderPaymentDate: {
-    fontSize: 11,
-    color: "#888",
-    marginTop: 3,
-  },
-
-  orderPaymentAmount: {
-    fontSize: 14,
-    fontWeight: "800",
-    color: "#218838",
-  },
-
-  orderDetailsCloseButton: {
-    backgroundColor: "#8B1238",
-    height: 52,
+  editProfileButton: {
+    height: 49,
     borderRadius: 14,
+    backgroundColor: "#C2185B",
     alignItems: "center",
     justifyContent: "center",
-    marginTop: 8,
-    marginBottom: 30,
+    marginTop: 20,
   },
 
-  orderDetailsCloseButtonText: {
+  editProfileButtonText: {
     color: "#FFFFFF",
-    fontSize: 14,
-    fontWeight: "700",
+    fontSize: 12,
+    fontWeight: "900",
+  },
+
+  bottomSpace: {
+    height: 20,
   },
 });
+
+
+
+
+
+
+
+
